@@ -1,0 +1,6 @@
+@UniCon.WebServer_HostAddress = http://localhost:5125
+
+GET {{UniCon.WebServer_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

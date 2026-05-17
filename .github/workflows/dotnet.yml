@@ -1,0 +1,67 @@
+name: UniCon CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # Full history for versioning tools if needed
+
+    - name: Setup .NET 10
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/Directory.Packages.props') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+
+    - name: Restore dependencies
+      run: dotnet restore UniCon.sln
+
+    - name: Build solution
+      run: dotnet build UniCon.sln --configuration Release --no-restore
+
+    - name: Run tests
+      run: dotnet test UniCon.sln --configuration Release --no-restore --verbosity normal --logger "trx;LogFileName=test-results.trx"
+
+    - name: Upload Test Results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: "**/test-results.trx"
+
+  publish:
+    needs: build-and-test
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[release]')
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 10
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Pack projects
+      run: dotnet pack UniCon.sln --configuration Release --output ./artifacts
+
+    - name: Push to NuGet
+      run: dotnet nuget push "./artifacts/*.nupkg" -k ${{ secrets.NUGET_API_KEY }} -s https://api.nuget.org/v3/index.json --skip-duplicate

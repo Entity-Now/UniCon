@@ -1,0 +1,8 @@
+bin
+obj
+_Out/**
+.cache
+dist
+node_modules
+.vs
+_Out

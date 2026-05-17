@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.6" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\UniCon.Core\UniCon.Core.csproj" />
+    <ProjectReference Include="..\UniCon.Drivers.S7\UniCon.Drivers.S7.csproj" />
+    <ProjectReference Include="..\UniCon.Drivers.Modbus\UniCon.Drivers.Modbus.csproj" />
+    <ProjectReference Include="..\UniCon.Drivers.OpcUa\UniCon.Drivers.OpcUa.csproj" />
+    <ProjectReference Include="..\UniCon.Drivers.Mqtt\UniCon.Drivers.Mqtt.csproj" />
+    <ProjectReference Include="..\UniCon.Drivers.OpcUaPubSub\UniCon.Drivers.OpcUaPubSub.csproj" />
+  </ItemGroup>
+
+</Project>
