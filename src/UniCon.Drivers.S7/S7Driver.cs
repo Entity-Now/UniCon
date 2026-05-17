@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using S7.Net;
 using UniCon.Core;
+using UniCon.Core.Caching;
 using UniCon.Core.Models;
 
 namespace UniCon.Drivers.S7
@@ -18,7 +19,8 @@ namespace UniCon.Drivers.S7
         private int _readTimeout = 0;
         private int _writeTimeout = 0;
 
-        public S7Driver(string driverId, ILogger logger) : base(driverId, logger)
+        public S7Driver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider)
+            : base(driverId, logger, cacheProvider)
         {
         }
 
@@ -101,8 +103,7 @@ namespace UniCon.Drivers.S7
         public override void Dispose()
         {
             _plc?.Close();
-            _syncLock.Dispose();
-            _connectionLock.Dispose();
+            base.Dispose();
         }
     }
 }

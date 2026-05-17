@@ -36,11 +36,8 @@ namespace UniCon.WebServer.Services
             _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
             _cacheProvider = cacheProvider ?? throw new ArgumentNullException(nameof(cacheProvider));
 
-            // 绑定 ODM 动态驱动加载工厂委托 (Scenario 2)
+            // ODM 动态驱动加载工厂委托
             UniCon.Core.Odm.OdmEngine.DriverFactory = CreateDriverInstance;
-
-            // 静态绑定驱动层统一缓存引擎句柄
-            DriverBase.CacheProvider = cacheProvider;
         }
 
         #region 动态驱动管理接口
@@ -271,12 +268,11 @@ namespace UniCon.WebServer.Services
 
             _activeSubscriptions[key] = true;
 
-            // 执行驱动底层的 SubscribeAsync 轮询注册
-            await driver.SubscribeAsync(address, dataValue =>
+            await driver.SubscribeAsync(address, async dataValue =>
             {
-                // 回调触发时将数据写入统一缓存介质 (RULE 2.2)
-                // 注意：在 ExceptionBased 模式下，只有数值或状态实际改变时才触发此回调
-                _cacheProvider.SetAsync(driverId, address, dataValue, CancellationToken.None);
+                // 回调触发时将数据写入统一缓存介质
+                // ExceptionBased 模式下只有数值或状态变化时才触发此回调
+                await _cacheProvider.SetAsync(driverId, address, dataValue, CancellationToken.None);
             }, ct);
 
             return true;
@@ -353,11 +349,11 @@ namespace UniCon.WebServer.Services
 
             return typeNormalized switch
             {
-                "S7" => new S7Driver(driverId, logger),
-                "MODBUS" => new ModbusDriver(driverId, logger),
-                "OPCUA" => new OpcUaDriver(driverId, logger),
-                "MQTT" => new MqttDriver(driverId, logger),
-                "OPCUAPUBSUB" => new OpcUaPubSubDriver(driverId, logger),
+                "S7"          => new S7Driver(driverId, logger, _cacheProvider),
+                "MODBUS"      => new ModbusDriver(driverId, logger, _cacheProvider),
+                "OPCUA"       => new OpcUaDriver(driverId, logger, _cacheProvider),
+                "MQTT"        => new MqttDriver(driverId, logger, _cacheProvider),
+                "OPCUAPUBSUB" => new OpcUaPubSubDriver(driverId, logger, _cacheProvider),
                 _ => throw new NotSupportedException($"Driver type '{driverType}' is currently not supported in the system.")
             };
         }

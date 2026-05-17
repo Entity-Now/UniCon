@@ -3,7 +3,9 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using UniCon.Core;
+using UniCon.Core.Caching;
 using UniCon.Core.Models;
 using UniCon.Drivers.OpcUaPubSub.Constants;
 using UniCon.Drivers.OpcUaPubSub.Transports;
@@ -15,9 +17,10 @@ public class OpcUaPubSubDriver : DriverBase
 {
     private IPubSubTransport? _transport;
     private IPubSubDecoder? _decoder;
-    private readonly ConcurrentDictionary<string, Action<DataValue<object>>> _subscriptions = new();
+    private readonly ConcurrentDictionary<string, Func<DataValue<object>, Task>> _subscriptions = new();
 
-    public OpcUaPubSubDriver(string driverId, Microsoft.Extensions.Logging.ILogger logger) : base(driverId, logger)
+    public OpcUaPubSubDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider)
+        : base(driverId, logger, cacheProvider)
     {
     }
 
@@ -77,7 +80,8 @@ public class OpcUaPubSubDriver : DriverBase
             {
                 if (_subscriptions.TryGetValue(kvp.Key, out var callback))
                 {
-                    callback.Invoke(kvp.Value);
+                    // fire-and-forget；异常隔离在 callback 内部
+                    _ = callback.Invoke(kvp.Value);
                 }
             }
         }
@@ -130,10 +134,13 @@ public class OpcUaPubSubDriver : DriverBase
 
     // --- 核心订阅逻辑 ---
 
-    public override Task SubscribeAsync(string address, Action<DataValue<object>> callback, CancellationToken ct = default)
+    public override Task<string> SubscribeAsync(
+        string address,
+        Func<DataValue<object>, Task> callback,
+        CancellationToken ct = default)
     {
-        _subscriptions.AddOrUpdate(address, callback, (_, _) => callback);
-        return Task.CompletedTask;
+        _subscriptions[address] = callback;
+        return Task.FromResult(address);
     }
 
     public override Task UnsubscribeAsync(string address, CancellationToken ct = default)
@@ -146,5 +153,6 @@ public class OpcUaPubSubDriver : DriverBase
     {
         _transport?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _subscriptions.Clear();
+        base.Dispose();
     }
 }

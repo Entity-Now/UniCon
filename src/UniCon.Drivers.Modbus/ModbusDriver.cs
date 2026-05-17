@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using EasyModbus;
 using Microsoft.Extensions.Logging;
 using UniCon.Core;
+using UniCon.Core.Caching;
 using UniCon.Core.Models;
 
 namespace UniCon.Drivers.Modbus
@@ -17,7 +18,8 @@ namespace UniCon.Drivers.Modbus
         private byte _unitId = 1;
         private int _timeout = 2000;
 
-        public ModbusDriver(string driverId, ILogger logger) : base(driverId, logger)
+        public ModbusDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider)
+            : base(driverId, logger, cacheProvider)
         {
         }
 
@@ -103,8 +105,7 @@ namespace UniCon.Drivers.Modbus
         public override void Dispose()
         {
             _client?.Disconnect();
-            _syncLock.Dispose();
-            _connectionLock.Dispose();
+            base.Dispose();
         }
     }
 }

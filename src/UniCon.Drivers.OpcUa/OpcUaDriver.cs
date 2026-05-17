@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using UniCon.Core;
+using UniCon.Core.Caching;
 using UniCon.Core.Helpers;
 using UniCon.Core.Models;
 using Workstation.ServiceModel.Ua;
@@ -17,7 +18,8 @@ namespace UniCon.Drivers.OpcUa
     {
         private ClientSessionChannel? _channel;
 
-        public OpcUaDriver(string driverId, ILogger logger) : base(driverId, logger)
+        public OpcUaDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider)
+            : base(driverId, logger, cacheProvider)
         {
         }
 
@@ -271,10 +273,10 @@ namespace UniCon.Drivers.OpcUa
 
         public override void Dispose()
         {
-            _channel?.AbortAsync().Wait();
-            _channel?.CloseAsync().Wait();
-            _syncLock.Dispose();
-            _connectionLock.Dispose();
+            // Abort async channel synchronously only during Dispose — last resort
+            _channel?.AbortAsync().GetAwaiter().GetResult();
+            _channel = null;
+            base.Dispose();
         }
     }
 }
