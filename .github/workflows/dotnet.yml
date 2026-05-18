@@ -5,63 +5,87 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-  workflow_dispatch: # Allow manual trigger
+  workflow_dispatch:
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
 
     steps:
+    # 1. Checkout
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0 # Full history for versioning tools if needed
 
+    # ✅ 2. Setup .NET 10（关键修复点）
     - name: Setup .NET 10
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '10.0.x'
+        include-prerelease: true
 
+    # 3. Cache
     - name: Cache NuGet packages
       uses: actions/cache@v4
       with:
         path: ~/.nuget/packages
-        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/Directory.Packages.props') }}
-        restore-keys: |
-          ${{ runner.os }}-nuget-
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
 
-    - name: Restore dependencies
-      run: dotnet restore UniCon.sln
+    # 4. Restore
+    - name: Restore
+      run: dotnet restore
 
-    - name: Build solution
-      run: dotnet build UniCon.sln --configuration Release --no-restore
+    # 5. Build
+    - name: Build
+      run: dotnet build --configuration Release --no-restore
 
-    - name: Run tests
-      run: dotnet test UniCon.sln --configuration Release --no-restore --verbosity normal --logger "trx;LogFileName=test-results.trx"
+    # 6. Test
+    - name: Test
+      run: |
+        dotnet test tests/UniCon.Tests/UniCon.Tests.csproj \
+          --configuration Release \
+          --no-build \
+          --logger "trx;LogFileName=test-results.trx"
 
+    # 7. Upload
     - name: Upload Test Results
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: test-results
-        path: "**/test-results.trx"
+        path: "**/*.trx"
 
   publish:
     needs: build-and-test
     if: github.event_name == 'push' && contains(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
 
+    steps:
+    # 1. Checkout
+    - uses: actions/checkout@v4
+
+    # ✅ 2. Setup .NET 10
     - name: Setup .NET 10
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '10.0.x'
+        include-prerelease: true
 
+    # 3. Restore
+    - name: Restore
+      run: dotnet restore
+
+    # ✅ 4. Pack
     - name: Pack projects
-      run: dotnet pack UniCon.sln --configuration Release --output ./artifacts
+      run: |
+        dotnet pack src \
+          --configuration Release \
+          --no-build \
+          --output ./artifacts
 
+    # ✅ 5. Push NuGet
     - name: Push to NuGet
-      run: dotnet nuget push "./artifacts/*.nupkg" -k ${{ secrets.NUGET_API_KEY }} -s https://api.nuget.org/v3/index.json --skip-duplicate
+      run: |
+        dotnet nuget push "./artifacts/*.nupkg" \
+          --api-key ${{ secrets.NUGET_API_KEY }} \
+          --source https://api.nuget.org/v3/index.json \
+          --skip-duplicate
