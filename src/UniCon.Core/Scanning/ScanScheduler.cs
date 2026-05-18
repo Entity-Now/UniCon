@@ -36,17 +36,17 @@ internal sealed class ScanScheduler : IAsyncDisposable
         NotificationDispatcher dispatcher,
         Func<IEnumerable<UniconRequest>, CancellationToken, Task<IEnumerable<UniconResponse<object>>>> batchReader)
     {
-        _driverId    = driverId;
-        _logger      = logger;
-        _registry    = registry;
+        _driverId = driverId;
+        _logger = logger;
+        _registry = registry;
         _cacheProvider = cacheProvider;
-        _dispatcher  = dispatcher;
+        _dispatcher = dispatcher;
         _batchReader = batchReader;
     }
 
     public void Start(CancellationToken externalCt)
     {
-        _cts          = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
         _schedulerTask = Task.Run(() => RunAsync(_cts.Token), _cts.Token);
         _dispatcher.Start(_cts.Token);
     }
@@ -57,7 +57,7 @@ internal sealed class ScanScheduler : IAsyncDisposable
         {
             try
             {
-                var now      = DateTime.UtcNow;
+                var now = DateTime.UtcNow;
                 var minWaitMs = int.MaxValue;
 
                 foreach (var group in _registry.GetAll())

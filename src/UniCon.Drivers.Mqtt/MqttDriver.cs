@@ -8,6 +8,7 @@ using MQTTnet;
 using UniCon.Core;
 using UniCon.Core.Caching;
 using UniCon.Core.Models;
+using UniCon.Core.Network;
 
 namespace UniCon.Drivers.Mqtt
 {
@@ -15,6 +16,7 @@ namespace UniCon.Drivers.Mqtt
     /// MQTT 驱动：Push 型协议，不进入 Polling Scheduler。
     /// 订阅由 MQTT broker 消息事件驱动，接收后通过 Channel 分发（via NotificationDispatcher）。
     /// </summary>
+    [UniconDriver("Mqtt")]
     public class MqttDriver : DriverBase
     {
         private IMqttClient? _mqttClient;
@@ -22,8 +24,8 @@ namespace UniCon.Drivers.Mqtt
         // callback 改为异步 Func，与 IUniconDriver 接口对齐
         private readonly ConcurrentDictionary<string, Func<DataValue<object>, Task>> _subscriptions = new();
 
-        public MqttDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider)
-            : base(driverId, logger, cacheProvider)
+        public MqttDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider, INetworkMonitor networkMonitor)
+            : base(driverId, logger, cacheProvider, networkMonitor)
         {
         }
 
@@ -49,17 +51,17 @@ namespace UniCon.Drivers.Mqtt
                 switch (key)
                 {
                     case "server":
-                    case "host":       server = val; break;
-                    case "port":       port = int.Parse(val); break;
-                    case "clientid":   builder.WithClientId(val); break;
+                    case "host": server = val; break;
+                    case "port": port = int.Parse(val); break;
+                    case "clientid": builder.WithClientId(val); break;
                     case "username":
-                    case "user":       username = val; break;
+                    case "user": username = val; break;
                     case "password":
-                    case "pwd":        password = val; break;
+                    case "pwd": password = val; break;
                     case "cleansession": cleanSession = bool.TryParse(val, out var c) ? c : cleanSession; break;
-                    case "keepalive":  keepAlive = int.Parse(val); break;
+                    case "keepalive": keepAlive = int.Parse(val); break;
                     case "usetls":
-                    case "tls":        useTls = bool.TryParse(val, out var t) ? t : useTls; break;
+                    case "tls": useTls = bool.TryParse(val, out var t) ? t : useTls; break;
                 }
             }
 
@@ -74,6 +76,15 @@ namespace UniCon.Drivers.Mqtt
             var factory = new MqttClientFactory();
             _mqttClient = factory.CreateMqttClient();
             _mqttClient.ApplicationMessageReceivedAsync += OnMessageReceivedAsync;
+            _mqttClient.DisconnectedAsync += e =>
+            {
+                if (State == DriverState.Connected)
+                {
+                    _logger.LogWarning("[Driver:{Id}] MQTT client unexpectedly disconnected. Transitioning to Faulted.", DriverId);
+                    State = DriverState.Faulted;
+                }
+                return Task.CompletedTask;
+            };
 
             await _mqttClient.ConnectAsync(builder.Build(), ct);
             return _mqttClient.IsConnected;
@@ -85,8 +96,8 @@ namespace UniCon.Drivers.Mqtt
 
             var dataValue = new DataValue<object>
             {
-                Value           = Encoding.UTF8.GetString(e.ApplicationMessage.Payload),
-                Status          = DataStatus.Good,
+                Value = Encoding.UTF8.GetString(e.ApplicationMessage.Payload),
+                Status = DataStatus.Good,
                 SourceTimestamp = DateTime.UtcNow,
                 ServerTimestamp = DateTime.UtcNow
             };

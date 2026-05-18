@@ -15,6 +15,11 @@ public interface IPubSubTransport : IAsyncDisposable
     event EventHandler<byte[]>? OnMessageReceived;
 
     /// <summary>
+    /// 当传输连接丢失时触发
+    /// </summary>
+    event EventHandler? ConnectionLost;
+
+    /// <summary>
     /// 连接/加入组播
     /// </summary>
     Task ConnectAsync(Uri uri, CancellationToken ct = default);

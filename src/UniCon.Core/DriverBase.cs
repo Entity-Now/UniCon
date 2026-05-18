@@ -8,6 +8,7 @@ using UniCon.Core.Caching;
 using UniCon.Core.Models;
 using UniCon.Core.Notification;
 using UniCon.Core.Scanning;
+using UniCon.Core.Network;
 
 namespace UniCon.Core;
 
@@ -31,30 +32,32 @@ public abstract class DriverBase : IUniconDriver
 {
     // ─── 依赖 ──────────────────────────────────────────────────────────────
     protected readonly ILogger _logger;
-    private   readonly IUniconCacheProvider _cacheProvider;
+    private readonly IUniconCacheProvider _cacheProvider;
+    private readonly INetworkMonitor _networkMonitor;
 
     // ─── 连接状态（无锁读取）─────────────────────────────────────────────
-    private          string? _connectionString;
+    private string? _connectionString;
     private int _state = (int)DriverState.Disconnected;
-    private          int     _reconnectAttempt;
+    private int _reconnectAttempt;
 
     // ─── 连接串行化锁（仅连接操作，非读写路径）─────────────────────────
     private readonly SemaphoreSlim _connectionLock = new(1, 1);
 
     // ─── Watchdog ─────────────────────────────────────────────────────────
     private CancellationTokenSource? _watchdogCts;
+    private readonly SemaphoreSlim _watchdogWakeSignal = new(0, 1);
 
     // ─── 订阅索引（subscriptionId → 路由信息，用于精准取消订阅）────────
     private readonly ConcurrentDictionary<string, SubscriptionRoute> _subscriptionIndex = new();
 
     // ─── 扫描基础设施 ─────────────────────────────────────────────────────
-    private readonly ScanGroupRegistry    _registry   = new();
-    private          ScanScheduler?       _scheduler;
-    private          NotificationDispatcher? _dispatcher;
-    private          CancellationTokenSource? _schedulerCts;
+    private readonly ScanGroupRegistry _registry = new();
+    private ScanScheduler? _scheduler;
+    private NotificationDispatcher? _dispatcher;
+    private CancellationTokenSource? _schedulerCts;
 
     // ─── 公开属性 ─────────────────────────────────────────────────────────
-    public string  DriverId         { get; }
+    public string DriverId { get; }
     public string? ConnectionString => _connectionString;
 
     public DriverState State
@@ -64,7 +67,13 @@ public abstract class DriverBase : IUniconDriver
         {
             var old = (DriverState)Interlocked.Exchange(ref _state, (int)value);
             if (old != value)
+            {
                 StateChanged?.Invoke(this, new DriverStateChangedEventArgs(DriverId, old, value));
+                if (value is DriverState.Faulted or DriverState.Disconnected)
+                {
+                    WakeWatchdog();
+                }
+            }
         }
     }
 
@@ -73,18 +82,41 @@ public abstract class DriverBase : IUniconDriver
     public event EventHandler<DriverStateChangedEventArgs>? StateChanged;
 
     // ─── 重连 & 扫描配置 ──────────────────────────────────────────────────
-    public bool EnableAutoReconnect  { get; set; } = true;
-    public int  MaxRetryIntervalMs   { get; set; } = 30_000;
-    public int  InitialRetryIntervalMs { get; set; } = 1_000;
+    public bool EnableAutoReconnect { get; set; } = true;
+    public int MaxRetryIntervalMs { get; set; } = 30_000;
+    public int InitialRetryIntervalMs { get; set; } = 1_000;
     public UniconScanMode DefaultScanMode { get; set; } = UniconScanMode.ExceptionBased;
-    public int  DefaultScanRateMs    { get; set; } = 1_000;
+    public int DefaultScanRateMs { get; set; } = 1_000;
 
     // ─── 构造函数（CacheProvider 通过 DI 注入，非 static）───────────────
-    protected DriverBase(string driverId, ILogger logger, IUniconCacheProvider cacheProvider)
+    protected DriverBase(string driverId, ILogger logger, IUniconCacheProvider cacheProvider, INetworkMonitor networkMonitor)
     {
-        DriverId       = driverId;
-        _logger        = logger;
+        DriverId = driverId;
+        _logger = logger;
         _cacheProvider = cacheProvider;
+        _networkMonitor = networkMonitor;
+        _networkMonitor.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
+    }
+
+    private void OnNetworkAvailabilityChanged(object? sender, bool available)
+    {
+        if (available && EnableAutoReconnect && (State is DriverState.Faulted or DriverState.Disconnected))
+        {
+            _logger.LogInformation("[Driver:{Id}] Network availability change detected. Waking up watchdog.", DriverId);
+            WakeWatchdog();
+        }
+    }
+
+    private void WakeWatchdog()
+    {
+        try
+        {
+            if (_watchdogWakeSignal.CurrentCount == 0)
+            {
+                _watchdogWakeSignal.Release();
+            }
+        }
+        catch { }
     }
 
     // =========================================================================
@@ -187,8 +219,27 @@ public abstract class DriverBase : IUniconDriver
         {
             try
             {
+                if (!_networkMonitor.IsNetworkAvailable)
+                {
+                    _logger.LogWarning("[Driver:{Id}] Network is offline. Reconnection paused.", DriverId);
+                    while (!_networkMonitor.IsNetworkAvailable && !ct.IsCancellationRequested)
+                    {
+                        try
+                        {
+                            await _watchdogWakeSignal.WaitAsync(2000, ct);
+                        }
+                        catch (OperationCanceledException) { break; }
+                        catch { }
+                    }
+                    if (ct.IsCancellationRequested) break;
+                    _logger.LogInformation("[Driver:{Id}] Network back online. Resuming reconnection.", DriverId);
+                    _reconnectAttempt = 0;
+                }
+
                 if (State is DriverState.Faulted or DriverState.Disconnected)
+                {
                     await ReconnectAsync(ct);
+                }
                 else if (State == DriverState.Connected && !await PingAsync(ct))
                 {
                     _logger.LogWarning("[Driver:{Id}] Heartbeat lost. Marking Faulted.", DriverId);
@@ -201,7 +252,13 @@ public abstract class DriverBase : IUniconDriver
                 _logger.LogError(ex, "[Driver:{Id}] Watchdog error.", DriverId);
             }
 
-            await Task.Delay(CalculateRetryDelayMs(), ct);
+            var delay = CalculateRetryDelayMs();
+            try
+            {
+                await _watchdogWakeSignal.WaitAsync(delay, ct);
+            }
+            catch (OperationCanceledException) { break; }
+            catch { }
         }
     }
 
@@ -293,10 +350,10 @@ public abstract class DriverBase : IUniconDriver
     {
         return SubscribeAsync(new UniconSubscription
         {
-            Address    = address,
-            Callback   = callback,
+            Address = address,
+            Callback = callback,
             ScanRateMs = DefaultScanRateMs,
-            ScanMode   = DefaultScanMode
+            ScanMode = DefaultScanMode
         }, ct);
     }
 
@@ -309,7 +366,7 @@ public abstract class DriverBase : IUniconDriver
 
         // 注册阶段：address 去重，加入对应 ScanGroup 的 TagEntry
         var group = _registry.GetOrCreate(subscription.ScanRateMs, subscription.ScanMode);
-        var tag   = group.GetOrAddTag(subscription.Address, subscription.Metadata);
+        var tag = group.GetOrAddTag(subscription.Address, subscription.Metadata);
         tag.AddSubscriber(subscription.Id, subscription.Callback);
 
         // 路由索引，供精准取消订阅使用
@@ -328,6 +385,18 @@ public abstract class DriverBase : IUniconDriver
             subscription.ScanRateMs, subscription.ScanMode);
 
         return Task.FromResult(subscription.Id);
+    }
+
+    public virtual async Task<IEnumerable<string>> SubscribeBatchAsync(
+        IEnumerable<UniconSubscription> subscriptions, CancellationToken ct = default)
+    {
+        var ids = new List<string>();
+        foreach (var sub in subscriptions)
+        {
+            if (ct.IsCancellationRequested) break;
+            ids.Add(await SubscribeAsync(sub, ct));
+        }
+        return ids;
     }
 
     public virtual Task UnsubscribeAsync(string address, CancellationToken ct = default)
@@ -352,6 +421,25 @@ public abstract class DriverBase : IUniconDriver
         if (!string.IsNullOrWhiteSpace(subscriptionId))
             RemoveSubscription(subscriptionId);
 
+        return Task.CompletedTask;
+    }
+
+    public virtual async Task UnsubscribeBatchAsync(IEnumerable<string> addresses, CancellationToken ct = default)
+    {
+        foreach (var addr in addresses)
+        {
+            if (ct.IsCancellationRequested) break;
+            await UnsubscribeAsync(addr, ct);
+        }
+    }
+
+    public virtual Task UnsubscribeBatchByIdAsync(IEnumerable<string> subscriptionIds, CancellationToken ct = default)
+    {
+        foreach (var id in subscriptionIds)
+        {
+            if (ct.IsCancellationRequested) break;
+            RemoveSubscription(id);
+        }
         return Task.CompletedTask;
     }
 
@@ -388,8 +476,8 @@ public abstract class DriverBase : IUniconDriver
         if (_scheduler is not null) return;
 
         _schedulerCts = new CancellationTokenSource();
-        _dispatcher   = new NotificationDispatcher(_logger);
-        _scheduler    = new ScanScheduler(
+        _dispatcher = new NotificationDispatcher(_logger);
+        _scheduler = new ScanScheduler(
             DriverId,
             _logger,
             _registry,
@@ -408,8 +496,8 @@ public abstract class DriverBase : IUniconDriver
         _schedulerCts?.Cancel();
         await _scheduler.DisposeAsync();
 
-        _scheduler    = null;
-        _dispatcher   = null;
+        _scheduler = null;
+        _dispatcher = null;
         _schedulerCts?.Dispose();
         _schedulerCts = null;
 
@@ -442,10 +530,15 @@ public abstract class DriverBase : IUniconDriver
         if (!disposing) return;
 
         StopWatchdog();
+        if (_networkMonitor != null)
+        {
+            _networkMonitor.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
+        }
         // StopSchedulerAsync 是 async，Dispose 中同步等待是最后手段
         StopSchedulerAsync().GetAwaiter().GetResult();
         CleanupSubscriptions();
         _connectionLock.Dispose();
+        _watchdogWakeSignal.Dispose();
     }
 
     // =========================================================================

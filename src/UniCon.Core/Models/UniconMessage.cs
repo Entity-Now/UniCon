@@ -6,10 +6,10 @@ namespace UniCon.Core.Models;
 /// <summary>数据质量状态 (OPC UA DataStatus 简化映射)</summary>
 public enum DataStatus
 {
-    Good      = 0,
-    Bad       = 1,
+    Good = 0,
+    Bad = 1,
     Uncertain = 2,
-    Timeout   = 3
+    Timeout = 3
 }
 
 /// <summary>
@@ -19,11 +19,11 @@ public enum DataStatus
 /// </summary>
 public class DataValue<T>
 {
-    public T?         Value           { get; set; }
-    public DataStatus Status          { get; set; } = DataStatus.Good;
-    public QualityCode Quality        { get; set; } = QualityCode.Good;
-    public DateTime   SourceTimestamp { get; set; } = DateTime.UtcNow;
-    public DateTime   ServerTimestamp { get; set; } = DateTime.UtcNow;
+    public T? Value { get; set; }
+    public DataStatus Status { get; set; } = DataStatus.Good;
+    public QualityCode Quality { get; set; } = QualityCode.Good;
+    public DateTime SourceTimestamp { get; set; } = DateTime.UtcNow;
+    public DateTime ServerTimestamp { get; set; } = DateTime.UtcNow;
 
     public override string ToString()
         => $"[{Status}|0x{(ushort)Quality:X4}] {Value} (src:{SourceTimestamp:HH:mm:ss.fff})";
@@ -33,7 +33,7 @@ public class DataValue<T>
 public class UniconRequest
 {
     public string Address { get; set; } = string.Empty;
-    public Dictionary<string, string> Headers    { get; set; } = new();
+    public Dictionary<string, string> Headers { get; set; } = new();
     public Dictionary<string, object> Parameters { get; set; } = new();
     public object? Body { get; set; }
 }
@@ -47,20 +47,20 @@ public class UniconResponse<T>
     public DataValue<T>? Data { get; set; }
 
     public Dictionary<string, string> Headers { get; set; } = new();
-    public int    StatusCode   { get; set; } = 0;
+    public int StatusCode { get; set; } = 0;
     public string? ErrorMessage { get; set; }
 
     public static UniconResponse<T> CreateSuccess(T value, DataStatus status = DataStatus.Good) => new()
     {
         Success = true,
-        Data    = new DataValue<T> { Value = value, Status = status }
+        Data = new DataValue<T> { Value = value, Status = status }
     };
 
     public static UniconResponse<T> CreateFailure(string error, int code = -1) => new()
     {
-        Success      = false,
+        Success = false,
         ErrorMessage = error,
-        StatusCode   = code,
-        Data         = new DataValue<T> { Status = DataStatus.Bad, Quality = QualityCode.BadNoCommunication }
+        StatusCode = code,
+        Data = new DataValue<T> { Status = DataStatus.Bad, Quality = QualityCode.BadNoCommunication }
     };
 }

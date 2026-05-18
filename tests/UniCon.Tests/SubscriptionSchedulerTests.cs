@@ -8,6 +8,7 @@ using Moq;
 using UniCon.Core;
 using UniCon.Core.Caching;
 using UniCon.Core.Models;
+using UniCon.Core.Network;
 using Xunit;
 
 namespace UniCon.Tests
@@ -20,8 +21,8 @@ namespace UniCon.Tests
         public int ReadCallCount { get; private set; }
         public List<string> ReadAddresses { get; } = new();
 
-        public TestDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider)
-            : base(driverId, logger, cacheProvider)
+        public TestDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider, INetworkMonitor networkMonitor)
+            : base(driverId, logger, cacheProvider, networkMonitor)
         {
         }
 
@@ -72,7 +73,9 @@ namespace UniCon.Tests
         public async Task Scheduler_GroupsAndBatchesReads_AndTriggersCallbacks()
         {
             // Arrange
-            var driver = new TestDriver("TestDriver_01", _loggerMock.Object, _cache);
+            var networkMonitorMock = new Mock<INetworkMonitor>();
+            networkMonitorMock.Setup(m => m.IsNetworkAvailable).Returns(true);
+            var driver = new TestDriver("TestDriver_01", _loggerMock.Object, _cache, networkMonitorMock.Object);
             driver.SetConnected();
 
             var callback1Called = false;
@@ -82,18 +85,18 @@ namespace UniCon.Tests
 
             var sub1 = new UniconSubscription
             {
-                Address    = "DB1.DBD0",
+                Address = "DB1.DBD0",
                 ScanRateMs = 10,
-                ScanMode   = UniconScanMode.Polled,
-                Callback   = data => { callback1Called = true; val1 = data.Value; return Task.CompletedTask; }
+                ScanMode = UniconScanMode.Polled,
+                Callback = data => { callback1Called = true; val1 = data.Value; return Task.CompletedTask; }
             };
 
             var sub2 = new UniconSubscription
             {
-                Address    = "DB1.DBD4",
+                Address = "DB1.DBD4",
                 ScanRateMs = 10,
-                ScanMode   = UniconScanMode.Polled,
-                Callback   = data => { callback2Called = true; val2 = data.Value; return Task.CompletedTask; }
+                ScanMode = UniconScanMode.Polled,
+                Callback = data => { callback2Called = true; val2 = data.Value; return Task.CompletedTask; }
             };
 
             // Act

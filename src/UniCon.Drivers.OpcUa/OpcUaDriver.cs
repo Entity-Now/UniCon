@@ -9,17 +9,19 @@ using UniCon.Core;
 using UniCon.Core.Caching;
 using UniCon.Core.Helpers;
 using UniCon.Core.Models;
+using UniCon.Core.Network;
 using Workstation.ServiceModel.Ua;
 using Workstation.ServiceModel.Ua.Channels;
 
 namespace UniCon.Drivers.OpcUa
 {
+    [UniconDriver("OpcUa")]
     public class OpcUaDriver : DriverBase
     {
         private ClientSessionChannel? _channel;
 
-        public OpcUaDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider)
-            : base(driverId, logger, cacheProvider)
+        public OpcUaDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider, INetworkMonitor networkMonitor)
+            : base(driverId, logger, cacheProvider, networkMonitor)
         {
         }
 
@@ -217,15 +219,33 @@ namespace UniCon.Drivers.OpcUa
                 options.SecurityPolicy
             );
 
+            _channel.Faulted += OnChannelFaultedOrClosed;
+            _channel.Closed += OnChannelFaultedOrClosed;
+
             await _channel.OpenAsync(ct);
             return _channel.State == CommunicationState.Opened;
+        }
+
+        private void OnChannelFaultedOrClosed(object? sender, EventArgs e)
+        {
+            if (State == DriverState.Connected)
+            {
+                _logger.LogWarning("[Driver:{Id}] OPC UA channel faulted or closed. Transitioning to Faulted.", DriverId);
+                State = DriverState.Faulted;
+            }
         }
 
         protected override async Task OnDisconnectAsync(CancellationToken ct)
         {
             if (_channel != null)
             {
-                await _channel.CloseAsync(ct);
+                _channel.Faulted -= OnChannelFaultedOrClosed;
+                _channel.Closed -= OnChannelFaultedOrClosed;
+                try
+                {
+                    await _channel.CloseAsync(ct);
+                }
+                catch { }
                 _channel = null;
             }
         }
@@ -248,6 +268,11 @@ namespace UniCon.Drivers.OpcUa
             }
             catch (Exception ex)
             {
+                if (ex is TimeoutException or IOException || _channel == null || _channel.State != CommunicationState.Opened)
+                {
+                    _logger.LogError(ex, "[Driver:{Id}] Read exception. Transitioning to Faulted.", DriverId);
+                    State = DriverState.Faulted;
+                }
                 return UniconResponse<T>.CreateFailure(ex.Message, 500);
             }
         }
@@ -267,15 +292,25 @@ namespace UniCon.Drivers.OpcUa
             }
             catch (Exception ex)
             {
+                if (ex is TimeoutException or IOException || _channel == null || _channel.State != CommunicationState.Opened)
+                {
+                    _logger.LogError(ex, "[Driver:{Id}] Write exception. Transitioning to Faulted.", DriverId);
+                    State = DriverState.Faulted;
+                }
                 return UniconResponse<bool>.CreateFailure(ex.Message, 500);
             }
         }
 
         public override void Dispose()
         {
-            // Abort async channel synchronously only during Dispose — last resort
-            _channel?.AbortAsync().GetAwaiter().GetResult();
-            _channel = null;
+            if (_channel != null)
+            {
+                _channel.Faulted -= OnChannelFaultedOrClosed;
+                _channel.Closed -= OnChannelFaultedOrClosed;
+                // Abort async channel synchronously only during Dispose — last resort
+                _channel.AbortAsync().GetAwaiter().GetResult();
+                _channel = null;
+            }
             base.Dispose();
         }
     }

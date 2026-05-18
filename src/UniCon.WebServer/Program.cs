@@ -7,6 +7,7 @@ using UniCon.Core.Jobs;
 using UniCon.Core.Jobs.BuiltIn;
 using UniCon.WebServer.Models;
 
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
@@ -14,21 +15,15 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddHttpClient();
 
-// Configure Quartz.NET
-builder.Services.AddQuartz(q =>
-{
-    // Use a Scoped container to create jobs
-    q.UseMicrosoftDependencyInjectionJobFactory();
-});
-
-// Quartz.NET hosting
-builder.Services.AddQuartzHostedService(q => q.WaitForJobsToComplete = true);
-
 builder.Services.AddUniCon();
+builder.Services.AddUniConJobs();
 builder.Services.AddSingleton<CommunicationService>();
-builder.Services.AddSingleton<JobScheduler>();
 
 var app = builder.Build();
+
+// Discover and register concrete driver types using reflection assembly scanning (v2.3)
+var driverRegistry = app.Services.GetRequiredService<IDriverRegistry>();
+driverRegistry.DiscoverAndRegisterDrivers();
 
 // Initialize and start the job scheduler
 var jobScheduler = app.Services.GetRequiredService<JobScheduler>();
@@ -263,6 +258,126 @@ odmGroup.MapPost("/data", async ([FromBody] ProductionLineEntity entity, OdmEngi
 .WithName("WriteOdmEntity")
 .WithSummary("强类型实体反射写入物理设备")
 .WithDescription("场景 2: 接收强类型实体，反射获取属性值，自动强类型转换并批量物理下发写入。");
+
+#endregion
+
+#region 4. 任务调度系统接口组 (Job Scheduler Management)
+
+var jobsGroup = app.MapGroup("/api/jobs").WithOpenApi();
+
+// GET /api/jobs/count - 获取当前正在执行的任务数量
+jobsGroup.MapGet("/executing-count", async (JobScheduler scheduler) =>
+{
+    var count = await scheduler.GetExecutingJobsCountAsync();
+    return Results.Ok(new { ExecutingCount = count });
+})
+.WithName("GetExecutingJobsCount")
+.WithSummary("获取当前正在执行的 Job 数量")
+.WithDescription("实时统计整个调度器中当前正处于运行状态 the Job 总数。");
+
+// GET /api/jobs - 查询所有已调度任务列表
+jobsGroup.MapGet("/", async (JobScheduler scheduler) =>
+{
+    var list = await scheduler.GetJobsAsync();
+    return Results.Ok(list);
+})
+.WithName("GetJobsList")
+.WithSummary("获取所有任务调度列表")
+.WithDescription("返回调度器中所有已经注册和安排的任务的元数据、状态及数据映射。");
+
+// GET /api/jobs/{id} - 查询单个任务的详细信息
+jobsGroup.MapGet("/{id}", async (string id, JobScheduler scheduler) =>
+{
+    var job = await scheduler.GetJobAsync(id);
+    return job != null ? Results.Ok(job) : Results.NotFound(new { Message = $"Job '{id}' not found." });
+})
+.WithName("GetJobDetails")
+.WithSummary("查询单个任务调度详情");
+
+// POST /api/jobs - 动态安排新任务
+jobsGroup.MapPost("/", async ([FromBody] CreateJobRequest request, JobScheduler scheduler) =>
+{
+    if (request == null || string.IsNullOrWhiteSpace(request.JobId) || string.IsNullOrWhiteSpace(request.JobType) || string.IsNullOrWhiteSpace(request.CronExpression))
+    {
+        return Results.BadRequest(new { Message = "Required parameters: JobId, JobType, and CronExpression must be provided." });
+    }
+
+    var resolvedType = AppDomain.CurrentDomain.GetAssemblies()
+        .SelectMany(a => a.GetTypes())
+        .FirstOrDefault(t => (t.Name == request.JobType || t.FullName == request.JobType) && typeof(IJob).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
+
+    if (resolvedType == null)
+    {
+        return Results.BadRequest(new { Message = $"Job type '{request.JobType}' was not found or does not implement IJob." });
+    }
+
+    try
+    {
+        var dataMap = new JobDataMap();
+        if (request.JobDataMap != null)
+        {
+            foreach (var kv in request.JobDataMap)
+            {
+                dataMap[kv.Key] = kv.Value;
+            }
+        }
+
+        await scheduler.ScheduleJobAsync(request.JobId, resolvedType, request.CronExpression, dataMap);
+        return Results.Created($"/api/jobs/{request.JobId}", new { Message = $"Job '{request.JobId}' scheduled successfully." });
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Conflict(new { Message = ex.Message });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 500);
+    }
+})
+.WithName("CreateJob")
+.WithSummary("动态调度新任务");
+
+// PUT /api/jobs/{id} - 更新已安排的任务 (Cron 及伴随数据)
+jobsGroup.MapPut("/{id}", async (string id, [FromBody] UpdateJobRequest request, JobScheduler scheduler) =>
+{
+    if (request == null || string.IsNullOrWhiteSpace(request.CronExpression))
+    {
+        return Results.BadRequest(new { Message = "Required parameter: CronExpression must be provided." });
+    }
+
+    try
+    {
+        var dataMap = request.JobDataMap != null ? new JobDataMap((IDictionary<string, object>)request.JobDataMap) : null;
+        var success = await scheduler.UpdateJobAsync(id, request.CronExpression, dataMap);
+        return success
+            ? Results.Ok(new { Message = $"Job '{id}' updated successfully." })
+            : Results.NotFound(new { Message = $"Job '{id}' not found." });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 500);
+    }
+})
+.WithName("UpdateJob")
+.WithSummary("修改已安排任务");
+
+// DELETE /api/jobs/{id} - 注销并彻底删除特定任务
+jobsGroup.MapDelete("/{id}", async (string id, JobScheduler scheduler) =>
+{
+    try
+    {
+        var success = await scheduler.DeleteJobAsync(id);
+        return success
+            ? Results.Ok(new { Message = $"Job '{id}' deleted successfully." })
+            : Results.NotFound(new { Message = $"Job '{id}' not found." });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 500);
+    }
+})
+.WithName("DeleteJob")
+.WithSummary("注销删除指定任务");
 
 #endregion
 

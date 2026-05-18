@@ -13,6 +13,7 @@ public class MqttPubSubTransport : IPubSubTransport
 {
     private IMqttClient? _mqttClient;
     public event EventHandler<byte[]>? OnMessageReceived;
+    public event EventHandler? ConnectionLost;
 
     public async Task ConnectAsync(Uri uri, CancellationToken ct = default)
     {
@@ -29,6 +30,15 @@ public class MqttPubSubTransport : IPubSubTransport
             if (e.ApplicationMessage.PayloadSegment.Array != null)
             {
                 OnMessageReceived?.Invoke(this, e.ApplicationMessage.PayloadSegment.ToArray());
+            }
+            return Task.CompletedTask;
+        };
+
+        _mqttClient.DisconnectedAsync += e =>
+        {
+            if (_mqttClient != null)
+            {
+                ConnectionLost?.Invoke(this, EventArgs.Empty);
             }
             return Task.CompletedTask;
         };

@@ -30,10 +30,10 @@ public sealed record DriverStateChangedEventArgs(
 /// </summary>
 public interface IUniconDriver : IDisposable
 {
-    string  DriverId         { get; }
+    string DriverId { get; }
     string? ConnectionString { get; }
-    DriverState State        { get; }
-    bool IsConnected         => State == DriverState.Connected;
+    DriverState State { get; }
+    bool IsConnected => State == DriverState.Connected;
 
     /// <summary>驱动状态发生变更时触发</summary>
     event EventHandler<DriverStateChangedEventArgs>? StateChanged;
@@ -42,7 +42,7 @@ public interface IUniconDriver : IDisposable
     Task DisconnectAsync(CancellationToken ct = default);
     Task<bool> PingAsync(CancellationToken ct = default);
 
-    Task<UniconResponse<T>>    ReadAsync<T>(UniconRequest request, CancellationToken ct = default);
+    Task<UniconResponse<T>> ReadAsync<T>(UniconRequest request, CancellationToken ct = default);
     Task<UniconResponse<bool>> WriteAsync<T>(UniconRequest request, T value, CancellationToken ct = default);
 
     /// <summary>真实批量读取，由具体 Driver 实现；DriverBase 提供 foreach 兜底</summary>
@@ -63,8 +63,17 @@ public interface IUniconDriver : IDisposable
     /// <summary>注册结构化订阅，返回订阅 ID</summary>
     Task<string> SubscribeAsync(UniconSubscription subscription, CancellationToken ct = default);
 
+    /// <summary>批量注册结构化订阅</summary>
+    Task<IEnumerable<string>> SubscribeBatchAsync(IEnumerable<UniconSubscription> subscriptions, CancellationToken ct = default);
+
     Task UnsubscribeAsync(string address, CancellationToken ct = default);
     Task UnsubscribeByIdAsync(string subscriptionId, CancellationToken ct = default);
+
+    /// <summary>批量取消订阅 (根据地址)</summary>
+    Task UnsubscribeBatchAsync(IEnumerable<string> addresses, CancellationToken ct = default);
+
+    /// <summary>批量取消订阅 (根据 ID)</summary>
+    Task UnsubscribeBatchByIdAsync(IEnumerable<string> subscriptionIds, CancellationToken ct = default);
 
     IEnumerable<UniconSubscription> GetSubscriptions();
 

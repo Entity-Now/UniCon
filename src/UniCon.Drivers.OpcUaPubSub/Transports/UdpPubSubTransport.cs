@@ -16,6 +16,7 @@ public class UdpPubSubTransport : IPubSubTransport
     private Task? _receiveTask;
 
     public event EventHandler<byte[]>? OnMessageReceived;
+    public event EventHandler? ConnectionLost;
 
     public Task ConnectAsync(Uri uri, CancellationToken ct = default)
     {
@@ -55,6 +56,10 @@ public class UdpPubSubTransport : IPubSubTransport
         {
             // Handle or log socket errors
             Console.WriteLine($"[UdpTransport] Receive loop error: {ex.Message}");
+            if (!token.IsCancellationRequested)
+            {
+                ConnectionLost?.Invoke(this, EventArgs.Empty);
+            }
         }
     }
 

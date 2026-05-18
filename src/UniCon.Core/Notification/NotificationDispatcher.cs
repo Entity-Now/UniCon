@@ -22,12 +22,12 @@ internal sealed class NotificationDispatcher : IAsyncDisposable
     /// <param name="boundedCapacity">队列最大容量；满时丢弃最旧数据（Backpressure 控制）</param>
     public NotificationDispatcher(ILogger logger, int boundedCapacity = 4096)
     {
-        _logger  = logger;
+        _logger = logger;
         _channel = Channel.CreateBounded<NotificationEnvelope>(new BoundedChannelOptions(boundedCapacity)
         {
-            FullMode      = BoundedChannelFullMode.DropOldest,  // 满时丢弃最旧数据
-            SingleReader  = true,
-            SingleWriter  = false,
+            FullMode = BoundedChannelFullMode.DropOldest,  // 满时丢弃最旧数据
+            SingleReader = true,
+            SingleWriter = false,
             AllowSynchronousContinuations = false
         });
     }
@@ -38,7 +38,7 @@ internal sealed class NotificationDispatcher : IAsyncDisposable
 
     public void Start(CancellationToken externalCt)
     {
-        _cts          = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
         _consumerTask = Task.Run(() => ConsumeLoopAsync(_cts.Token), _cts.Token);
     }
 

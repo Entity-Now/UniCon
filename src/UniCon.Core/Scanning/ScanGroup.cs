@@ -25,8 +25,8 @@ internal sealed class ScanGroup
     public ScanGroup(int scanRateMs, UniconScanMode scanMode)
     {
         ScanRateMs = scanRateMs;
-        ScanMode   = scanMode;
-        Strategy   = scanMode == UniconScanMode.Polled
+        ScanMode = scanMode;
+        Strategy = scanMode == UniconScanMode.Polled
             ? PolledScanStrategy.Instance
             : ExceptionBasedScanStrategy.Instance;
     }

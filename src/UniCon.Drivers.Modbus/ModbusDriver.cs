@@ -6,9 +6,11 @@ using Microsoft.Extensions.Logging;
 using UniCon.Core;
 using UniCon.Core.Caching;
 using UniCon.Core.Models;
+using UniCon.Core.Network;
 
 namespace UniCon.Drivers.Modbus
 {
+    [UniconDriver("Modbus")]
     public class ModbusDriver : DriverBase
     {
         private ModbusClient? _client;
@@ -18,8 +20,8 @@ namespace UniCon.Drivers.Modbus
         private byte _unitId = 1;
         private int _timeout = 2000;
 
-        public ModbusDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider)
-            : base(driverId, logger, cacheProvider)
+        public ModbusDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider, INetworkMonitor networkMonitor)
+            : base(driverId, logger, cacheProvider, networkMonitor)
         {
         }
 
@@ -75,6 +77,11 @@ namespace UniCon.Drivers.Modbus
             }
             catch (Exception ex)
             {
+                if (_client == null || !_client.Connected)
+                {
+                    _logger.LogWarning("[Driver:{Id}] Modbus client disconnected during read. Transitioning to Faulted.", DriverId);
+                    State = DriverState.Faulted;
+                }
                 return UniconResponse<T>.CreateFailure(ex.Message, 500);
             }
         }
@@ -98,8 +105,18 @@ namespace UniCon.Drivers.Modbus
             }
             catch (Exception ex)
             {
+                if (_client == null || !_client.Connected)
+                {
+                    _logger.LogWarning("[Driver:{Id}] Modbus client disconnected during write. Transitioning to Faulted.", DriverId);
+                    State = DriverState.Faulted;
+                }
                 return UniconResponse<bool>.CreateFailure(ex.Message, 500);
             }
+        }
+
+        public override Task<bool> PingAsync(CancellationToken ct = default)
+        {
+            return Task.FromResult(_client is { Connected: true });
         }
 
         public override void Dispose()

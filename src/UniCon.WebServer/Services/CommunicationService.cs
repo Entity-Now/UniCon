@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using UniCon.Core;
 using UniCon.Core.Caching;
 using UniCon.Core.Models;
+using UniCon.Core.Network;
 using UniCon.Drivers.S7;
 using UniCon.Drivers.Modbus;
 using UniCon.Drivers.OpcUa;
@@ -21,7 +22,6 @@ namespace UniCon.WebServer.Services
     /// </summary>
     public class CommunicationService : IDisposable
     {
-        private readonly ILoggerFactory _loggerFactory;
         private readonly IConnectionManager _connectionManager;
         private readonly IDriverRegistry _driverRegistry;
         private readonly IUniconCacheProvider _cacheProvider;
@@ -29,9 +29,8 @@ namespace UniCon.WebServer.Services
         // 活动订阅点位注册表 (RULE 2.2)
         private readonly ConcurrentDictionary<(string DriverId, string Address), bool> _activeSubscriptions = new();
 
-        public CommunicationService(ILoggerFactory loggerFactory, IDriverRegistry driverRegistry, IConnectionManager connectionManager, IUniconCacheProvider cacheProvider)
+        public CommunicationService(IDriverRegistry driverRegistry, IConnectionManager connectionManager, IUniconCacheProvider cacheProvider)
         {
-            _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
             _driverRegistry = driverRegistry ?? throw new ArgumentNullException(nameof(driverRegistry));
             _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
             _cacheProvider = cacheProvider ?? throw new ArgumentNullException(nameof(cacheProvider));
@@ -344,18 +343,7 @@ namespace UniCon.WebServer.Services
 
         private IUniconDriver CreateDriverInstance(string driverId, string driverType)
         {
-            var typeNormalized = driverType.ToUpperInvariant();
-            var logger = _loggerFactory.CreateLogger(driverType);
-
-            return typeNormalized switch
-            {
-                "S7"          => new S7Driver(driverId, logger, _cacheProvider),
-                "MODBUS"      => new ModbusDriver(driverId, logger, _cacheProvider),
-                "OPCUA"       => new OpcUaDriver(driverId, logger, _cacheProvider),
-                "MQTT"        => new MqttDriver(driverId, logger, _cacheProvider),
-                "OPCUAPUBSUB" => new OpcUaPubSubDriver(driverId, logger, _cacheProvider),
-                _ => throw new NotSupportedException($"Driver type '{driverType}' is currently not supported in the system.")
-            };
+            return _driverRegistry.CreateDriver(driverType, driverId);
         }
 
         private static DriverStatus GetDriverStatus(IUniconDriver driver)

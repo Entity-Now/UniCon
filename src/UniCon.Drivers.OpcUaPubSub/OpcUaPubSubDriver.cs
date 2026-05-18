@@ -7,20 +7,22 @@ using Microsoft.Extensions.Logging;
 using UniCon.Core;
 using UniCon.Core.Caching;
 using UniCon.Core.Models;
+using UniCon.Core.Network;
 using UniCon.Drivers.OpcUaPubSub.Constants;
 using UniCon.Drivers.OpcUaPubSub.Transports;
 using UniCon.Drivers.OpcUaPubSub.Decoders;
 
 namespace UniCon.Drivers.OpcUaPubSub;
 
+[UniconDriver("OpcUaPubSub")]
 public class OpcUaPubSubDriver : DriverBase
 {
     private IPubSubTransport? _transport;
     private IPubSubDecoder? _decoder;
     private readonly ConcurrentDictionary<string, Func<DataValue<object>, Task>> _subscriptions = new();
 
-    public OpcUaPubSubDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider)
-        : base(driverId, logger, cacheProvider)
+    public OpcUaPubSubDriver(string driverId, ILogger logger, IUniconCacheProvider cacheProvider, INetworkMonitor networkMonitor)
+        : base(driverId, logger, cacheProvider, networkMonitor)
     {
     }
 
@@ -61,10 +63,20 @@ public class OpcUaPubSubDriver : DriverBase
 
         // 3. 挂载事件
         _transport.OnMessageReceived += Transport_OnMessageReceived;
+        _transport.ConnectionLost += Transport_ConnectionLost;
 
         // 4. 连接底层
         await _transport.ConnectAsync(uri, ct);
         return true;
+    }
+
+    private void Transport_ConnectionLost(object? sender, EventArgs e)
+    {
+        if (State == DriverState.Connected)
+        {
+            _logger.LogWarning("[Driver:{Id}] Transport connection lost. Transitioning to Faulted.", DriverId);
+            State = DriverState.Faulted;
+        }
     }
 
     private void Transport_OnMessageReceived(object? sender, byte[] payload)
@@ -97,6 +109,7 @@ public class OpcUaPubSubDriver : DriverBase
         if (_transport != null)
         {
             _transport.OnMessageReceived -= Transport_OnMessageReceived;
+            _transport.ConnectionLost -= Transport_ConnectionLost;
             await _transport.DisconnectAsync(ct);
             await _transport.DisposeAsync();
             _transport = null;
@@ -151,7 +164,13 @@ public class OpcUaPubSubDriver : DriverBase
 
     public override void Dispose()
     {
-        _transport?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        if (_transport != null)
+        {
+            _transport.OnMessageReceived -= Transport_OnMessageReceived;
+            _transport.ConnectionLost -= Transport_ConnectionLost;
+            _transport.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            _transport = null;
+        }
         _subscriptions.Clear();
         base.Dispose();
     }

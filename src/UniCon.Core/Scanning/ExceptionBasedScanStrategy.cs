@@ -37,14 +37,14 @@ internal sealed class ExceptionBasedScanStrategy : IScanStrategy
     {
         result = value switch
         {
-            double d  => d,
-            float f   => f,
-            int i     => i,
-            long l    => l,
-            short s   => s,
-            byte b    => b,
+            double d => d,
+            float f => f,
+            int i => i,
+            long l => l,
+            short s => s,
+            byte b => b,
             decimal m => (double)m,
-            _         => double.NaN
+            _ => double.NaN
         };
 
         return !double.IsNaN(result);
