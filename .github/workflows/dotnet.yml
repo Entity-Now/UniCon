@@ -74,15 +74,19 @@ jobs:
     - name: Restore
       run: dotnet restore
 
-    # ✅ 4. Pack
+    # 4. Build Release
+    - name: Build
+      run: dotnet build UniCon.slnx --configuration Release --no-restore
+
+    # ✅ 5. Pack
     - name: Pack projects
       run: |
-        dotnet pack src \
+        dotnet pack UniCon.slnx \
           --configuration Release \
           --no-build \
           --output ./artifacts
 
-    # ✅ 5. Push NuGet
+    # ✅ 6. Push NuGet
     - name: Push to NuGet
       run: |
         dotnet nuget push "./artifacts/*.nupkg" \

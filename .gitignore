@@ -6,3 +6,4 @@ dist
 node_modules
 .vs
 _Out
+artifacts
