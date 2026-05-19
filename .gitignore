@@ -7,3 +7,4 @@ node_modules
 .vs
 _Out
 artifacts
+.git-docs-worktree
