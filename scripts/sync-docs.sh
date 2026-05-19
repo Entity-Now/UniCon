@@ -12,6 +12,10 @@
 
 set -e
 
+# Unset Git environment variables to prevent conflicts when run from Git Hooks
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_QUARANTINE_PATH
+
+
 # Configuration
 REPO_DIR="/Users/entity/Desktop/Language/CSharp/UniGateway/UniCon"
 WORKTREE_DIR="$REPO_DIR/.git-docs-worktree"
