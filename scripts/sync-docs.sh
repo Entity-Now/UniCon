@@ -31,13 +31,32 @@ cd "$REPO_DIR"
 # 2. Check/Setup Git Worktree for docs branch
 if [ ! -d "$WORKTREE_DIR" ]; then
     echo "Creating temporary git worktree at $WORKTREE_DIR..."
-    git worktree add -B "$DOCS_BRANCH" "$WORKTREE_DIR" "$DOCS_BRANCH"
+    
+    # Try to fetch the docs branch from origin to make it available locally
+    git fetch origin "$DOCS_BRANCH:$DOCS_BRANCH" 2>/dev/null || true
+    
+    # Check if docs branch exists locally now
+    if git show-ref --verify --quiet "refs/heads/$DOCS_BRANCH"; then
+        git worktree add "$WORKTREE_DIR" "$DOCS_BRANCH"
+    else
+        # Self-healing: If docs branch doesn't exist, initialize it as an orphan
+        echo "Branch '$DOCS_BRANCH' not found. Initializing branch..."
+        # Try using --orphan flag (modern git)
+        if git worktree add --orphan "$WORKTREE_DIR" 2>/dev/null; then
+            echo "Created orphan worktree."
+        else
+            # Fallback for older git versions: create branch off main and clean it
+            git worktree add -b "$DOCS_BRANCH" "$WORKTREE_DIR"
+            git -C "$WORKTREE_DIR" rm -rf .
+        fi
+    fi
 else
     echo "Using existing git worktree at $WORKTREE_DIR..."
-    # Ensure it's clean and checkout the correct branch
+    git fetch origin "$DOCS_BRANCH:$DOCS_BRANCH" 2>/dev/null || true
     git -C "$WORKTREE_DIR" checkout -f "$DOCS_BRANCH"
     git -C "$WORKTREE_DIR" reset --hard HEAD
 fi
+
 
 # 3. Clear target directories in the worktree docs content folder
 # We only clear folders that exist in our main docs directory to avoid erasing
