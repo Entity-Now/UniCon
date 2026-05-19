@@ -26,8 +26,8 @@ cat << 'EOF' > package.json
   "version": "1.0.0",
   "description": "UniCon Documentation",
   "scripts": {
-    "dev": "vuepress dev docs",
-    "build": "vuepress build docs"
+    "dev": "vuepress dev .",
+    "build": "vuepress build ."
   },
   "dependencies": {
     "vue": "^3.4.0"
@@ -38,6 +38,7 @@ cat << 'EOF' > package.json
     "vuepress-theme-plume": "1.0.0-rc.201"
   }
 }
+
 EOF
 
 cat << 'EOF' > .gitignore
@@ -48,9 +49,9 @@ node_modules
 .DS_Store
 EOF
 
-mkdir -p docs/.vuepress
+mkdir -p .vuepress
 
-cat << 'EOF' > docs/.vuepress/config.ts
+cat << 'EOF' > .vuepress/config.ts
 import { viteBundler } from '@vuepress/bundler-vite'
 import { defineUserConfig } from 'vuepress'
 import { plumeTheme } from 'vuepress-theme-plume'
@@ -86,7 +87,7 @@ export default defineUserConfig({
 })
 EOF
 
-cat << 'EOF' > docs/.vuepress/plume.config.ts
+cat << 'EOF' > .vuepress/plume.config.ts
 import { defineThemeConfig, defineCollection } from 'vuepress-theme-plume'
 
 export default defineThemeConfig({
@@ -148,7 +149,7 @@ export default defineThemeConfig({
 })
 EOF
 
-cat << 'EOF' > docs/README.md
+cat << 'EOF' > README.md
 ---
 pageLayout: home
 config:

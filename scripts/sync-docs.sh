@@ -58,11 +58,11 @@ else
 fi
 
 
-# 3. Clear target directories in the worktree docs content folder
-# We only clear folders that exist in our main docs directory to avoid erasing
-# other configurations like .vuepress or README.md in the docs branch.
+# 3. Clear target directories in the worktree root
+# We also clean up any legacy nested docs/ folder if it exists in the worktree
+rm -rf "$WORKTREE_DIR/docs"
+
 echo "Syncing documentation directories..."
-mkdir -p "$WORKTREE_DIR/docs"
 
 for dir in docs/*/; do
     dir=${dir%/}
@@ -76,12 +76,13 @@ for dir in docs/*/; do
     echo " -> Syncing module: $base"
     
     # Clean up target folder in docs branch to handle deleted/renamed files
-    rm -rf "$WORKTREE_DIR/docs/$base"
-    mkdir -p "$WORKTREE_DIR/docs/$base"
+    rm -rf "$WORKTREE_DIR/$base"
+    mkdir -p "$WORKTREE_DIR/$base"
     
     # Copy fresh content
-    cp -r "$dir/"* "$WORKTREE_DIR/docs/$base/"
+    cp -r "$dir/"* "$WORKTREE_DIR/$base/"
 done
+
 
 # 4. Check for changes in worktree
 git -C "$WORKTREE_DIR" add .
