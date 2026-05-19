@@ -1,8 +1,9 @@
 #!/bin/bash
 set -e
 
-REPO_DIR="/Users/entity/Desktop/Language/CSharp/UniGateway/UniCon"
-TEMP_DIR="/Users/entity/Desktop/Language/CSharp/UniGateway/unicon-docs-temp"
+REPO_DIR=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+TEMP_DIR="$(dirname "$REPO_DIR")/unicon-docs-temp"
+
 
 echo "Initializing docs branch in temp directory..."
 rm -rf "$TEMP_DIR"

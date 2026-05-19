@@ -17,9 +17,11 @@ unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_QUARANTINE_PATH
 
 
 # Configuration
-REPO_DIR="/Users/entity/Desktop/Language/CSharp/UniGateway/UniCon"
+# Find the repository root dynamically instead of hardcoding
+REPO_DIR=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 WORKTREE_DIR="$REPO_DIR/.git-docs-worktree"
 DOCS_BRANCH="docs"
+
 
 echo "=== Starting UniCon Documentation Sync ==="
 
