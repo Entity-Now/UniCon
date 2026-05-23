@@ -1,0 +1,121 @@
+---
+url: /en/docs/77hr4gzb/index.md
+---
+# Communication Job (CommunicationJob)
+
+## Overview
+
+`CommunicationJob` is a built-in device communication scheduled task in UniCon. It retrieves registered driver instances via `IDriverRegistry` and executes **periodic read** or **periodic write** operations on target physical device addresses when triggered by a specified Cron expression.
+
+The read/write results are recorded in the logging system. The task utilizes `context.CancellationToken` provided by Quartz to handle task cancellation and employs reflection to support read/write calls for arbitrary generic data types.
+
+> **Prerequisite**: The target driver must already be registered via `IDriverRegistry.Register()` and its connection state must be online (`IsConnected == true`); otherwise, the task will skip execution.
+
+## Usage
+
+Register the task through `JobScheduler.ScheduleJobAsync<CommunicationJob>()` and pass parameters using the `JobDataMap`:
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadTemperature",
+    cronExpression: "0/10 * * * * ?",  // Every 10 seconds
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBD0",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Single"  // float
+    }
+);
+```
+
+## Parameters
+
+Pass the following key-value pairs through `JobDataMap` (accessed via the `JobDataKeys` constant class):
+
+| JobDataKeys Constant | Actual Key Name | Type | Description | Required | Default Value |
+|-----------------|---------|------|------|----------|--------|
+| `JobDataKeys.CommDriverId` | `Job_Comm_DriverId` | `string` | The registered driver's unique ID (must be registered and online) | Yes | — |
+| `JobDataKeys.CommAddress` | `Job_Comm_Address` | `string` | Target communication address (format is protocol-dependent, e.g., `DB1.DBD0`, `holding:1`) | Yes | — |
+| `JobDataKeys.CommOperation` | `Job_Comm_Operation` | `string` | Operation type: `"Read"` or `"Write"` (case-insensitive) | No | `"Read"` |
+| `JobDataKeys.CommValue` | `Job_Comm_Value` | `object` | Target value to write (Required for Write operations) | No | `null` |
+| `JobDataKeys.CommDataType` | `Job_Comm_DataType` | `string` | Full name of the data type (e.g., `"System.Single"`, `"System.Boolean"`, `"System.Int16"`) | No | `"System.Object"` |
+
+## Returns
+
+`CommunicationJob` executes asynchronously, and results are recorded in the logging system:
+
+| Condition | Log Level | Content |
+|------|---------|------|
+| Read Completed | `Information` | `Read Response: {UniconResponse}` |
+| Write Completed | `Information` | `Write Response: {UniconResponse}` |
+| Driver Missing/Disconnected | — | Task silently skipped (no log) |
+| Execution Exception | `Error` | `CommunicationJob failed for {driverId}` |
+
+## Examples
+
+**Example 1: Periodic S7 temperature reading (float) every 10 seconds**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadTemperature",
+    cronExpression: "0/10 * * * * ?",
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBD0",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Single"
+    }
+);
+```
+
+**Example 2: Automatic PLC counter reset (writing 0) at midnight daily**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ResetDailyCounter",
+    cronExpression: "0 0 0 * * ?",  // Daily at 00:00:00
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBW10",
+        [JobDataKeys.CommOperation] = "Write",
+        [JobDataKeys.CommValue]     = 0,
+        [JobDataKeys.CommDataType]  = "System.Int16"
+    }
+);
+```
+
+**Example 3: Modbus meter current reading (int) every minute**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadMeterCurrent",
+    cronExpression: "0 * * * * ?",  // Every minute
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "Meter_01",
+        [JobDataKeys.CommAddress]   = "holding:30001",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Int32"
+    }
+);
+```
+
+**Example 4: Publish gateway heartbeat to MQTT every 30 seconds**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "MqttHeartbeat",
+    cronExpression: "0/30 * * * * ?",  // Every 30 seconds
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "Cloud_Broker",
+        [JobDataKeys.CommAddress]   = "gateway/heartbeat",
+        [JobDataKeys.CommOperation] = "Write",
+        [JobDataKeys.CommValue]     = "{\"status\": \"alive\"}",
+        [JobDataKeys.CommDataType]  = "System.String"
+    }
+);
+```

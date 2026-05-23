@@ -1,0 +1,121 @@
+---
+url: /docs/77hr4gzb/index.md
+---
+# 通讯联动任务 (CommunicationJob)
+
+## 概述 (Overview)
+
+`CommunicationJob` 是 UniCon 内置的设备通讯定时任务，通过 `IDriverRegistry` 获取已注册的驱动实例，在指定 Cron 表达式触发时，对目标物理设备地址执行**定时读取**或**定时写入**操作。
+
+读写结果记录在日志系统中。任务使用 Quartz 提供的 `context.CancellationToken` 处理任务取消，使用反射机制支持任意泛型数据类型的读写调用。
+
+> **前提**：目标驱动必须已通过 `IDriverRegistry.Register()` 注册，且驱动状态为 `Connected`（`IsConnected == true`），否则任务将跳过本次执行。
+
+## 使用方法 (Usage)
+
+通过 `JobScheduler.ScheduleJobAsync<CommunicationJob>()` 注册，使用 `JobDataMap` 传入参数：
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadTemperature",
+    cronExpression: "0/10 * * * * ?",  // 每 10 秒
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBD0",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Single"  // float
+    }
+);
+```
+
+## 参数说明 (Parameters)
+
+通过 `JobDataMap` 传递以下键值（使用 `JobDataKeys` 常量类访问）：
+
+| JobDataKeys 常量 | 实际键名 | 类型 | 说明 | 是否必填 | 默认值 |
+|-----------------|---------|------|------|----------|--------|
+| `JobDataKeys.CommDriverId` | `Job_Comm_DriverId` | `string` | 已注册的驱动唯一 ID（必须已通过 Register 注册且在线） | 是 | — |
+| `JobDataKeys.CommAddress` | `Job_Comm_Address` | `string` | 目标通讯地址（格式与协议相关，如 `DB1.DBD0`、`holding:1`） | 是 | — |
+| `JobDataKeys.CommOperation` | `Job_Comm_Operation` | `string` | 操作类型：`"Read"` 或 `"Write"`（大小写不敏感） | 否 | `"Read"` |
+| `JobDataKeys.CommValue` | `Job_Comm_Value` | `object` | 写入时的目标值（Write 操作必填） | 否 | `null` |
+| `JobDataKeys.CommDataType` | `Job_Comm_DataType` | `string` | 数据类型的完整名称（如 `"System.Single"`, `"System.Boolean"`, `"System.Int16"`） | 否 | `"System.Object"` |
+
+## 返回值 (Returns)
+
+`CommunicationJob` 为异步执行任务，结果记录在日志系统中：
+
+| 情况 | 日志级别 | 内容 |
+|------|---------|------|
+| 读取完成 | `Information` | `Read Response: {UniconResponse}` |
+| 写入完成 | `Information` | `Write Response: {UniconResponse}` |
+| 驱动不存在或未连接 | — | 任务静默跳过（无日志） |
+| 执行异常 | `Error` | `CommunicationJob failed for {driverId}` |
+
+## 使用示例 (Examples)
+
+**示例 1：每 10 秒定时读取 S7 温度（float）**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadTemperature",
+    cronExpression: "0/10 * * * * ?",
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBD0",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Single"
+    }
+);
+```
+
+**示例 2：每天零点自动重置 PLC 计数器（写入 0）**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ResetDailyCounter",
+    cronExpression: "0 0 0 * * ?",  // 每天 00:00:00
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBW10",
+        [JobDataKeys.CommOperation] = "Write",
+        [JobDataKeys.CommValue]     = 0,
+        [JobDataKeys.CommDataType]  = "System.Int16"
+    }
+);
+```
+
+**示例 3：每分钟读取 Modbus 仪表电流（int）**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadMeterCurrent",
+    cronExpression: "0 * * * * ?",  // 每分钟
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "Meter_01",
+        [JobDataKeys.CommAddress]   = "holding:30001",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Int32"
+    }
+);
+```
+
+**示例 4：每 30 秒向 MQTT 发布网关心跳**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "MqttHeartbeat",
+    cronExpression: "0/30 * * * * ?",  // 每 30 秒
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "Cloud_Broker",
+        [JobDataKeys.CommAddress]   = "gateway/heartbeat",
+        [JobDataKeys.CommOperation] = "Write",
+        [JobDataKeys.CommValue]     = "{\"status\": \"alive\"}",
+        [JobDataKeys.CommDataType]  = "System.String"
+    }
+);
+```

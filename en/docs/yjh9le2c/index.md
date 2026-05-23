@@ -1,0 +1,232 @@
+---
+url: /en/docs/yjh9le2c/index.md
+---
+# Quick Start & Integration Guide
+
+This guide introduces how to reference the UniCon framework in a third-party project and quickly achieve industrial device communication and collection scheduling.
+
+## 1. Installation & Reference
+
+UniCon adopts a highly decoupled **pluggable and modular** architecture. The core framework and each physical communication driver are published in the NuGet repository as independent packages.
+
+::: tip 💡 Do I need to install all NuGet packages in sequence?
+**No.**
+You only need to, and must, install the core dependency package **`UniCon.Core`**. Then, based on your actual industrial scenarios, **selectively install only the specific protocol driver packages you need**. For example, if your project only requires collecting S7 PLC data and Modbus registers, you only need to install `UniCon.Core`, `UniCon.Drivers.S7`, and `UniCon.Drivers.Modbus`. This avoids importing unnecessary third-party external dependencies (such as OPC UA or MQTTnet libraries), keeping your business project minimal, clean, and highly efficient.
+:::
+
+### 📦 Core Scheduling Engine (Required)
+
+* **.NET CLI**:
+  ```bash
+  dotnet add package UniCon.Core
+  ```
+* **Package Manager Console**:
+  ```powershell
+  Install-Package UniCon.Core
+  ```
+
+### 🔌 Physical Communication Driver Packages (Select as Needed)
+
+| Driver Name | Description | .NET CLI Installation Command |
+| :--- | :--- | :--- |
+| **`UniCon.Drivers.S7`** | Siemens full-series PLC (S7-1200/1500/300) | `dotnet add package UniCon.Drivers.S7` |
+| **`UniCon.Drivers.OpcUa`** | High-performance OPC UA Client communication | `dotnet add package UniCon.Drivers.OpcUa` |
+| **`UniCon.Drivers.Modbus`** | Standard Modbus TCP physical devices | `dotnet add package UniCon.Drivers.Modbus` |
+| **`UniCon.Drivers.Mqtt`** | Lightweight MQTT message queue pub/sub | `dotnet add package UniCon.Drivers.Mqtt` |
+| **`UniCon.Drivers.OpcUaPubSub`** | OPC UA PubSub UDP/MQTT driver | `dotnet add package UniCon.Drivers.OpcUaPubSub` |
+
+***
+
+## 2. Integration into ASP.NET Core (Recommended Way)
+
+UniCon provides out-of-the-box extension methods to inject the registry, connection manager, cache, and job scheduler in one click.
+
+### Program.cs Registration Example
+
+```csharp
+using UniCon.Core;
+using UniCon.Core.Jobs;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Inject UniCon core services with one click
+// Includes: IDriverRegistry, IConnectionManager, INetworkMonitor,
+//           OdmEngine, IUniconCacheProvider(MemoryCacheProvider)
+builder.Services.AddUniCon();
+
+// Inject task scheduling system (with Quartz.NET and automatic built-in Job scanning)
+builder.Services.AddUniConJobs();
+
+var app = builder.Build();
+
+// Automatically discover and register all driver assemblies with the [UniconDriver] attribute
+var driverRegistry = app.Services.GetRequiredService<IDriverRegistry>();
+driverRegistry.DiscoverAndRegisterDrivers();
+
+// Start the job scheduler
+var jobScheduler = app.Services.GetRequiredService<JobScheduler>();
+await jobScheduler.StartAsync();
+
+app.Run();
+```
+
+***
+
+## 3. Basic Communication Example (Create Driver via DI Factory)
+
+In ASP.NET Core projects, it is recommended to use `IDriverRegistry` to create and manage drivers. All driver dependencies (`ILogger`, `IUniconCacheProvider`, `INetworkMonitor`) are automatically assembled by the DI container.
+
+```csharp
+using UniCon.Core;
+using UniCon.Core.Models;
+
+public class PlcService
+{
+    private readonly IDriverRegistry _driverRegistry;
+    private readonly IConnectionManager _connectionManager;
+
+    public PlcService(IDriverRegistry driverRegistry, IConnectionManager connectionManager)
+    {
+        _driverRegistry = driverRegistry;
+        _connectionManager = connectionManager;
+    }
+
+    public async Task InitializeAsync()
+    {
+        // Create S7 driver via alias (DI automatically assembles all dependencies)
+        var driver = _driverRegistry.CreateDriver("S7", "PLC_Line1");
+        _driverRegistry.Register(driver);
+
+        // Start the connection (Watchdog automatically reconnects with exponential backoff on initial failure)
+        await _connectionManager.RegisterDriverAsync(
+            driver,
+            "CpuType=S71200;Ip=192.168.0.10;Rack=0;Slot=1"
+        );
+
+        // Single-point read
+        var request = new UniconRequest { Address = "DB1.DBD0" };
+        var response = await driver.ReadAsync<float>(request);
+        if (response.Success)
+        {
+            Console.WriteLine($"Temperature: {response.Data?.Value} °C");
+            Console.WriteLine($"Data Quality: {response.Data?.Quality}");
+            Console.WriteLine($"PLC Timestamp: {response.Data?.SourceTimestamp}");
+        }
+    }
+}
+```
+
+***
+
+## 4. Active Collection Subscription Engine
+
+For protocols like S7 and Modbus that do not support active push, UniCon v2 provides a complete active polling subscription engine.
+
+```csharp
+// Structured subscription (Recommended, features deadband filtering and metadata)
+var subId = await driver.SubscribeAsync(new UniconSubscription
+{
+    Address    = "DB1.DBD0",
+    ScanRateMs = 500,                         // Poll every 500ms
+    ScanMode   = UniconScanMode.ExceptionBased, // Callback only on value or quality change
+    Metadata   = new TagMetadata
+    {
+        Name     = "Reactor Temperature",
+        Unit     = "℃",
+        Deadband = 0.5   // Changes < 0.5℃ will not trigger notification
+    },
+    Callback = async dataValue =>
+    {
+        Console.WriteLine($"[{dataValue.ServerTimestamp:HH:mm:ss.fff}] Temp: {dataValue.Value} ℃");
+        await Task.CompletedTask;
+    }
+});
+
+// Unsubscribe precisely by ID
+await driver.UnsubscribeByIdAsync(subId);
+```
+
+***
+
+## 5. Batch Operations
+
+### Batch Read (S7 automatically merges contiguous addresses, max 19 items/time)
+
+```csharp
+var requests = new List<UniconRequest>
+{
+    new() { Address = "DB1.DBD0" },
+    new() { Address = "DB1.DBD4" },
+    new() { Address = "DB1.DBX8.0" }
+};
+
+var results = await driver.ReadBatchAsync(requests);
+foreach (var res in results)
+{
+    if (res.Success)
+        Console.WriteLine($"Value: {res.Data?.Value}, Quality: {res.Data?.Quality}");
+}
+```
+
+### Get Scan Statistics
+
+```csharp
+var stats = driver.GetStatistics(500, UniconScanMode.ExceptionBased);
+if (stats != null)
+{
+    Console.WriteLine($"Scan Count: {stats.ScanCount}");
+    Console.WriteLine($"Notification Count: {stats.NotifyCount}");
+    Console.WriteLine($"Average Read Duration: {stats.AverageReadDurationMs:F1}ms");
+    Console.WriteLine($"Error Rate: {stats.ErrorRate:P2}");
+}
+```
+
+***
+
+## 6. Common Protocol Connection String Reference
+
+| Protocol | Connection String Example |
+| :--- | :--- |
+| **S7** | `CpuType=S71200;Ip=192.168.0.10;Rack=0;Slot=1` |
+| **S7 (with timeout)** | `CpuType=S71500;Ip=192.168.0.10;Rack=0;Slot=1;ReadTimeout=3000;WriteTimeout=3000` |
+| **Modbus** | `ip=192.168.0.50;port=502;unitid=1;timeout=2000` |
+| **OPC UA (Anonymous)** | `opc.tcp://192.168.0.100:4840` |
+| **OPC UA (User & Pwd)** | `EndpointURL=opc.tcp://192.168.0.100:4840;Username=admin;Password=secret` |
+| **MQTT** | `server=broker.hivemq.com;port=1883;clientid=UniCon_01` |
+| **MQTT (TLS)** | `server=broker.example.com;port=8883;username=user;password=pwd;usetls=true` |
+| **OPC UA PubSub (UDP)** | `opc.udp://224.0.2.14:4840` |
+| **OPC UA PubSub (MQTT)** | `mqtt://192.168.0.200:1883/opcua/pubsub` |
+
+***
+
+## 7. Driver State Listening
+
+```csharp
+driver.StateChanged += (_, e) =>
+{
+    Console.WriteLine($"[{e.DriverId}] State Changed: {e.OldState} → {e.NewState}");
+};
+```
+
+***
+
+## 8. Use Connection Extension Methods
+
+`ConnectionStringBuilder` provides fluent strongly-typed APIs to build connection strings:
+
+```csharp
+using UniCon.Core.Helpers;
+
+// Method 1: Build connection string fluently
+string connStr = ConnectionStringBuilder.S7()
+    .WithCpuType(S7CpuType.S71500)
+    .WithIp("192.168.1.10")
+    .WithRack(0)
+    .WithSlot(1)
+    .Build();
+// Output: CpuType=S71500;Ip=192.168.1.10;Rack=0;Slot=1
+
+// Method 2: Use direct connection extension method (Recommended)
+var driver = _driverRegistry.CreateDriver("S7", "PLC_01");
+bool isConnected = await driver.ConnectS7Async("192.168.1.10", S7CpuType.S71500);
+```

@@ -1,0 +1,39 @@
+---
+url: /en/docs/16mq4fzn/index.md
+---
+# Job System
+
+## Overview
+
+The UniCon Job Scheduling System is a task scheduling framework designed specifically for industrial-grade edge gateways and high-concurrency communication, built on a deep integration and encapsulation of Quartz.NET. The system perfectly supports the C# 10+ asynchronous programming model and provides out-of-the-box infrastructure for scheduling periodic edge device data uploads, third-party API interactions, and background communication link maintenance.
+
+## Module Responsibilities and Goals
+
+* **Decoupling Physical Points & Jobs**: Allows users to orchestrate jobs to automatically read or write physical channel data periodically at specific time intervals.
+* **Rich Built-in Job Library**: Provides job templates for various scenarios such as HTTP requests, system self-healing cleanups, and southbound driver real-time read/write operations.
+* **Dynamic Lifecycle Control (CRUD)**: Supports dynamically adding, modifying, pausing, resuming, and deleting jobs at runtime, while providing precise counts of active running jobs.
+* **Zero-Friction IoC Integration**: Offers a one-click dependency injection extension that automatically scans and registers all `IJob` implementations, achieving truly minimalist integration.
+
+## Major Features and Documents
+
+| File / Component | Responsibility Description |
+|-----------------|----------------------------|
+| [1.intro.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/en/docs/4.%20jobs/1.intro.md) | This document, outlining the responsibilities, architecture, and features of the Job System. |
+| [2.http-job.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/en/docs/4.%20jobs/2.http-job.md) | High-reliability HTTP communication job for periodic third-party RESTful API interactions. |
+| [3.communication-job.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/en/docs/4.%20jobs/3.communication-job.md) | Southbound communication job for periodic read/write interactions with UniCon device points. |
+| [4.job-scheduler.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/en/docs/4.%20jobs/4.job-scheduler.md) | Documentation for the core job manager API, containing CRUD operations, state statistics, and dependency injection guides. |
+
+## IoC Injection and Initialization
+
+The system provides a highly elegant, one-click extension method `AddUniConJobs()` for `IServiceCollection`:
+
+```csharp
+// Inject the scheduling system into the DI container, automatically scanning and loading all IJob tasks
+builder.Services.AddUniConJobs();
+
+var app = builder.Build();
+
+// Start the job scheduler
+var scheduler = app.Services.GetRequiredService<JobScheduler>();
+await scheduler.StartAsync();
+```

@@ -1,0 +1,147 @@
+---
+url: /docs/x7dmsvsl/index.md
+---
+# 对象-设备映射引擎 (OdmEngine)
+
+## 概述 (Overview)
+
+对象-设备映射引擎 `OdmEngine`（Object-Device Mapper，简称 ODM）是 UniCon 工业通讯框架中用于将**北向业务结构化实体类**与**南向工业设备物理通道**进行双向绑定与自动映射的高阶反射组件。
+
+它提供了类似于传统 ORM（如 Entity Framework）的高抽象度开发体验。主要解决以下两大典型工业场景：
+
+* **场景 1 (结构化点位自动生成)**: 通过反射扫描实体类上的特性元数据，自动提取并解析生成设备所需的物理点位表定义，淘汰手动硬编码地址。
+* **场景 2 (实体动态物理读写与连接自适应)**: 通过实体类上标记的连接配置，系统在读取时若发现设备驱动未运行，能自动通过 `IConnectionManager` 实例化并拉起底层物理连接，随后反射式批量读取并回填实体；写入时亦能反射获取非只读属性，强类型转换后批量物理下发。
+
+为了极大降低开发者的使用成本、排除拼写隐患并提供完美的 IDE 代码补全 (IntelliSense) 支持，所有的关键参数均设计为强类型枚举（`UniconDriverType` 和 `UniconDataType`）。
+
+***
+
+## 使用方法 (Usage)
+
+`OdmEngine` 已被注册在依赖注入 (DI) 容器中。您可以在任何控制器、服务或后台任务中直接通过构造函数注入使用：
+
+```csharp
+public class ProductionLineController
+{
+    private readonly OdmEngine _odmEngine;
+
+    public ProductionLineController(OdmEngine odmEngine)
+    {
+        _odmEngine = odmEngine;
+    }
+}
+```
+
+在系统初始化时，确保主应用已为 `OdmEngine` 绑定了具体的物理驱动实例化工厂方法：
+
+```csharp
+// 在主应用启动时配置驱动生产工厂委托（由 DI 或手动绑定）
+OdmEngine.DriverFactory = CreateDriverInstance;
+```
+
+***
+
+## 参数说明 (Parameters)
+
+### 1. 实体特征绑定特性 (UniconDeviceAttribute)
+
+标记在类声明上，用于指定驱动元数据。
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| driverType | `UniconDriverType` | 协议类型枚举（如 `UniconDriverType.S7`, `UniconDriverType.Modbus`, `UniconDriverType.OpcUa` 等） | 是 | 无 |
+| connectionString | `string` | 物理连接配置字符串（支持配合 `ConnectionStringBuilder` 流式生成） | 是 | 无 |
+| driverId | `string?` | 驱动的全局唯一标识 ID | 否 | 若不填则默认使用类名称 |
+
+### 2. 点位地址绑定特性 (UniconAddressAttribute)
+
+标记在属性上，用于定义具体物理点位参数。
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| address | `string` | 设备物理地址路径（如 `"DB1.DBD0"`, `"holding:40001"` 等） | 是 | 无 |
+| type | `UniconDataType` | 目标强类型转换指示器（如 `UniconDataType.Float`, `UniconDataType.Int32` 等），可有效规避拼写错误 | 否 | `UniconDataType.Object` |
+| IsWritable | `bool` | 是否支持北向向此点位执行写入 | 否 | `true` |
+
+***
+
+## 返回值 (Returns)
+
+### 1. 结构扫描方法 (`GenerateTags<T>`)
+
+| 类型 | 说明 |
+|------|------|
+| `IEnumerable<TagMappingInfo>` | 返回实体中所有标记了 `UniconAddressAttribute` 特性的点位映射元数据集合（包含自动转换后的 `TypeHint` 字符串） |
+
+### 2. 实体自动填充读取方法 (`ReadEntityAsync<T>`)
+
+| 类型 | 说明 |
+|------|------|
+| `Task<T>` | 异步任务，返回由底层物理通道数值读取后，进行强类型自动转换并装配完成的全新实体实例 |
+
+### 3. 实体反射物理写入方法 (`WriteEntityAsync<T>`)
+
+| 类型 | 说明 |
+|------|------|
+| `Task<UniconResponse<bool>>` | 异步任务，返回统一响应结构，指明批量点位物理写入下发是否全部成功 |
+
+***
+
+## 使用示例 (Examples)
+
+### 示例 1：定义生产线实体 (ProductionLineEntity)
+
+无需任何硬编码解析，配合强类型枚举特性标记，实现无差错绑定：
+
+```csharp
+using UniCon.Core.Attributes;
+using UniCon.Core.Models;
+
+[UniconDevice(UniconDriverType.S7, "CpuType=S71200;Ip=192.168.0.100;Rack=0;Slot=1", driverId: "PLC_ODM_01")]
+public class ProductionLineEntity
+{
+    [UniconAddress("DB1.DBD0", UniconDataType.Float)]
+    public float Temperature { get; set; }
+
+    [UniconAddress("DB1.DBD4", UniconDataType.Float)]
+    public float Pressure { get; set; }
+
+    [UniconAddress("DB1.DBX8.0", UniconDataType.Boolean)]
+    public bool IsRunning { get; set; }
+
+    [UniconAddress("DB1.DBD10", UniconDataType.Int32)]
+    public int ProductCount { get; set; }
+}
+```
+
+***
+
+### 示例 2：场景 1 (点位架构自动扫描输出)
+
+```csharp
+// 注入 OdmEngine 实例
+var tags = odmEngine.GenerateTags<ProductionLineEntity>();
+foreach (var tag in tags)
+{
+    Console.WriteLine($"属性: {tag.PropertyName} => 地址: {tag.Address} (类型指示: {tag.TypeHint})");
+}
+```
+
+***
+
+### 示例 3：场景 2 (实体自适应批量物理读取与写入)
+
+```csharp
+// 1. 批量自适应读取：若设备驱动 "PLC_ODM_01" 未启动，
+// OdmEngine 会自动从元数据拉起其 Watchdog 自愈线程并建立 Socket 连接，然后自动反射读取并回填实体实例。
+ProductionLineEntity currentData = await odmEngine.ReadEntityAsync<ProductionLineEntity>();
+Console.WriteLine($"当前反应釜温度: {currentData.Temperature}°C, 是否在运行: {currentData.IsRunning}");
+
+// 2. 批量物理下发写入
+currentData.Temperature = 55.4f;
+currentData.ProductCount = 1200;
+
+var response = await odmEngine.WriteEntityAsync(currentData);
+if (response.Success)
+{
+    Console.WriteLine("反应釜设定参数与累计值已成功下发至物理 PLC。");
+}
+```

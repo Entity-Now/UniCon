@@ -1,0 +1,108 @@
+---
+url: /docs/kjc510r9/index.md
+---
+# OPC UA 驱动 (OPC UA Driver)
+
+## 概述 (Overview)
+
+OPC UA (Client/Server) 驱动实现了经典的工业集成标准 OPC 统一架构通讯。本驱动支持作为客户端直接连接 OPC UA 服务器（如 Kepware, Siemens OPC UA Server 等）。底层利用 `Workstation.UaClient` 建立高吞吐量的 Session Channel 信道，提供类型安全的节点读取与写入操作。
+
+***
+
+## 使用方法 (Usage)
+
+通过 `OpcUaDriver` 实例传入符合标准协议格式的 Endpoint 终端地址（经典模式）或 Key-Value 安全参数组合连接字符串（安全增强模式）进行连接。
+
+### 1. 经典兼容模式 (无加密 / 匿名)
+
+```csharp
+await opcuaDriver.ConnectAsync("opc.tcp://192.168.1.150:4840");
+```
+
+### 2. 安全增强模式 (账户密码 / 安全策略 / 证书认证)
+
+```csharp
+// Semicolon-separated Key-Value connection string
+string connStr = "EndpointURL=opc.tcp://192.168.1.150:4840;Anonymous=false;Username=admin;Password=secret_pwd;SecurityPolicy=Basic256Sha256;IsSecurityPolicy=true;AppName=MyCustomGatewayClient";
+await opcuaDriver.ConnectAsync(connStr);
+```
+
+***
+
+## 参数说明 (Parameters)
+
+### 连接字符串参数 (ConnectionString Options)
+
+在**安全增强模式**下，连接字符串采用以分号 `;` 分割的 `Key=Value` 格式，支持以下高级安全参数：
+
+| 参数键名 (不区分大小写) | 数据类型 | 说明 | 默认值 |
+|-----------------------|---------|------|--------|
+| `EndpointURL` / `Endpoint` | `string` | OPC UA 服务器终端地址 (例如 `opc.tcp://127.0.0.1:4840`) | 无 (必填) |
+| `Anonymous` / `AnonymousIdentity` | `bool` | 是否使用匿名登录身份 | `true` (若配置了用户名密码则自动转为 `false`) |
+| `Username` / `User` | `string` | 用于账户身份认证的用户名 | 空 |
+| `Password` / `Pwd` | `string` | 用于账户身份认证的密码 | 空 |
+| `IsSecurityPolicy` / `SecurityPolicyEnabled` | `bool` | 是否开启安全配置策略。开启后将自动为客户端初始化本地证书存储库并自动生成/加载证书 | `false` |
+| `IsSecurityIdentity` / `CertificateAuth` | `bool` | 是否启用客户端 X.509 证书进行握手身份认证。若启用，则会从 `PkiPath` 路径加载客户端证书与私钥 | `false` |
+| `PkiPath` / `CertificatePath` | `string` | 自定义证书存储与验证库的根目录路径（加载公钥 `own/certs/public.der` 与私钥 `own/private/private.pem`） | `"pki"` |
+| `SecurityPolicy` | `string` | 加密与签名算法通道安全策略。支持: `None`, `Basic128Rsa15`, `Basic256`, `Basic256Sha256` | `SecurityPolicyUris.None` |
+| `ApplicationName` / `AppName` | `string` | 自定义向 OPC 服务器注册汇报的客户端应用标识名称 | `"UniCon Client"` |
+| `ApplicationUri` / `AppUri` | `string` | 自定义向 OPC 服务器注册汇报的客户端全局唯一应用 URI 标识 | `"urn:unicon:client:[GUID]"` |
+
+***
+
+## 返回值 (Returns)
+
+### ReadAsync 返回值
+
+| 类型 | 说明 |
+|------|------|
+| `UniconResponse<T>` | 响应包装器。如果读取成功且服务返回 Status 为 `Good`，则在内部携带变量值与对应质量状态；若读取失败或节点不存在，则带有详细的 OPC 协议层错误码 |
+
+### WriteAsync 返回值
+
+| 类型 | 说明 |
+|------|------|
+| `UniconResponse<bool>` | 响应包装器，若成功写入 PLC 的 OPC UA 节点则返回 `true`，失败则包含状态报错原因 |
+
+***
+
+## 使用示例 (Examples)
+
+**示例 1：使用用户名密码登录并使用 Basic256Sha256 策略建立安全会话**
+
+```csharp
+using UniCon.Core.Models;
+using UniCon.Drivers.OpcUa;
+
+var opcuaDriver = new OpcUaDriver("OPCUA_Sec_01", logger);
+
+// 拼接包含安全校验的 Key-Value 参数
+string connStr = "EndpointURL=opc.tcp://192.168.1.100:4840;Anonymous=false;Username=opcuser;Password=complexpwd123;SecurityPolicy=Basic256Sha256;IsSecurityPolicy=true;AppName=RefineryScannerGateway;AppUri=urn:myfactory:refinery:gateway";
+bool connected = await opcuaDriver.ConnectAsync(connStr);
+
+if (connected)
+{
+    Console.WriteLine("安全会话隧道创建成功！");
+    
+    // 执行高精度的 NodeId 点位读取
+    var req = new UniconRequest { Address = "ns=2;s=Device.Status.Run" };
+    var res = await opcuaDriver.ReadAsync<bool>(req);
+    
+    if (res.Success && res.Data != null)
+    {
+        Console.WriteLine($"点位状态: {res.Data.Value}");
+    }
+}
+```
+
+**示例 2：使用 X.509 客户端证书进行身份认证**
+对于必须采用公私钥对进行高级加密身份检验的场景，将证书资产存放在工作目录下的 `pki` 文件夹：
+
+* 公钥证书路径：`[BaseDir]/pki/own/certs/public.der`
+* 私钥证书路径：`[BaseDir]/pki/own/private/private.pem`
+
+```csharp
+// 启用客户端证书强校验模式，并指定自定义客户端应用标识名
+string connStr = "EndpointURL=opc.tcp://192.168.1.100:4840;IsSecurityPolicy=true;CertificateAuth=true;PkiPath=pki;SecurityPolicy=Basic256Sha256;AppName=SecurityAuditClient;AppUri=urn:unicon:security:audit";
+await opcuaDriver.ConnectAsync(connStr);
+```

@@ -1,0 +1,44 @@
+---
+url: /en/docs/e2s2408d/index.md
+---
+# Tag Endpoints
+
+## Usage
+
+Called by external HTTP clients to perform read/write operations on logical tags within the system.
+
+## Parameters
+
+* **GET /tags/{name}**:
+  * `name` (path): The logical tag name.
+* **POST /tags/{name}**:
+  * `name` (path): The logical tag name.
+  * `body` (JSON): The value object to write.
+
+## Returns
+
+* **GET**: Returns a `Tag` object as JSON.
+* **POST**: Returns a `UniconResponse<bool>` as JSON.
+  * Success: `200 OK`.
+  * Failure: `400 BadRequest`.
+
+## Examples
+
+### 1. Read a Tag using cURL
+
+```bash
+curl -X GET "https://localhost:5001/tags/Temperature"
+```
+
+### 2. Write a Tag using HttpClient (C#)
+
+```csharp
+var client = new HttpClient();
+var response = await client.PostAsJsonAsync("https://localhost:5001/tags/SetPoint", 25.5);
+
+if (response.IsSuccessStatusCode)
+{
+    var result = await response.Content.ReadFromJsonAsync<UniconResponse<bool>>();
+    Console.WriteLine($"Write Success: {result.Data}");
+}
+```

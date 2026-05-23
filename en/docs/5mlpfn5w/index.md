@@ -1,0 +1,100 @@
+---
+url: /en/docs/5mlpfn5w/index.md
+---
+# HTTP Job (HttpJob)
+
+## Overview
+
+`HttpJob` is a built-in HTTP request scheduled task in UniCon, implemented using `IHttpClientFactory` and supporting all standard HTTP methods including GET, POST, PUT, and DELETE. It allows configuration of request headers, query parameters, and request body, making it ideal for sending data or heartbeat packets to cloud platform Webhooks or RESTful APIs periodically.
+
+The job execution results are recorded in the logging system without throwing exceptions (gracefully degrading to logs on error), ensuring the stability of the scheduler.
+
+## Usage
+
+Register the task through `JobScheduler.ScheduleJobAsync<HttpJob>()` and pass parameters using the `JobDataMap`:
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "PushDataToCloud",
+    cronExpression: "0 0/5 * * * ?",
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]    = "https://api.example.com/v1/data",
+        [JobDataKeys.HttpMethod] = "POST",
+        [JobDataKeys.HttpBody]   = "{\"deviceId\": \"PLC_01\", \"status\": \"running\"}",
+        [JobDataKeys.HttpHeaders]= "{\"Authorization\": \"Bearer token123\", \"Content-Type\": \"application/json\"}"
+    }
+);
+```
+
+## Parameters
+
+Pass the following key-value pairs through `JobDataMap` (recommended to use the `JobDataKeys` constant class to avoid spelling errors):
+
+| JobDataKeys Constant | Actual Key Name | Type | Description | Required | Default Value |
+|-----------------|---------|------|------|----------|--------|
+| `JobDataKeys.HttpUrl` | `Job_Http_Url` | `string` | Target URL | Yes | — |
+| `JobDataKeys.HttpMethod` | `Job_Http_Method` | `string` | HTTP Request Method (`GET`, `POST`, `PUT`, `DELETE`, etc.) | No | `"GET"` |
+| `JobDataKeys.HttpHeaders` | `Job_Http_Headers` | `string` | JSON-serialized request headers dictionary `Dictionary<string, string>` | No | None |
+| `JobDataKeys.HttpQueryParams` | `Job_Http_QueryParams` | `string` | JSON-serialized query parameters dictionary `Dictionary<string, string>` | No | None |
+| `JobDataKeys.HttpBody` | `Job_Http_Body` | `string` | Request body string (always sent with `application/json` encoding) | No | None |
+
+## Returns
+
+`HttpJob` executes asynchronously and has no direct return value. Execution results are logged through the logging system:
+
+| Condition | Log Level | Content |
+|------|---------|------|
+| Execution Start | `Information` | `Executing HttpJob: {Method} {Url}` |
+| Execution Success | `Information` | `HttpJob response: {StatusCode}` |
+| URL Empty | `Warning` | `HttpJob skipped: URL is null or empty.` |
+| Execution Failure | `Error` | `HttpJob request failed. {Exception}` |
+| Query Parameters Parse Failure | `Error` | `Failed to parse HttpJob query parameters. {Exception}` |
+| Request Headers Parse Failure | `Error` | `Failed to apply HttpJob headers. {Exception}` |
+
+## Examples
+
+**Example 1: POST data to cloud Webhook every 5 minutes**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "PushDataToCloud",
+    cronExpression: "0 0/5 * * * ?",  // Every 5 minutes
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]     = "https://api.example.com/v1/data",
+        [JobDataKeys.HttpMethod]  = "POST",
+        [JobDataKeys.HttpBody]    = "{\"deviceId\": \"PLC_01\", \"status\": \"running\"}",
+        [JobDataKeys.HttpHeaders] = "{\"Authorization\": \"Bearer token123\"}"
+    }
+);
+```
+
+**Example 2: Scheduled GET request with query parameters**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "QueryCloudConfig",
+    cronExpression: "0 0 * * * ?",  // Hourly
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]         = "https://config.example.com/api/settings",
+        [JobDataKeys.HttpMethod]      = "GET",
+        [JobDataKeys.HttpQueryParams] = "{\"gatewayId\": \"GW_01\", \"version\": \"2\"}"
+    }
+);
+```
+
+**Example 3: Heartbeat detection GET request every 5 minutes**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "Heartbeat",
+    cronExpression: "0 0/5 * * * ?",
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]    = "https://api.example.com/heartbeat",
+        [JobDataKeys.HttpMethod] = "GET"
+    }
+);
+```

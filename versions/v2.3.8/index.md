@@ -1,0 +1,45 @@
+---
+url: /versions/v2.3.8/index.md
+---
+# v2.3.8 — 配置 GitHub Actions 自动通过 Git Tag 发布 NuGet 包 (v2.3.8)
+
+**日期**：2026-05-23
+**类型**：CI/CD
+
+***
+
+## \[v2.3.8] - 2026-05-23
+
+### Added / Changed
+
+* **CI/CD Workflow**: Updated `.github/workflows/dotnet.yml` to support trigger-by-tag release automation. When pushing tags matching `v*`, the build-and-test and publish jobs will run, automatically extracting the clean version number from the tag name (e.g., stripping `v` from `v2.3.8` to get `2.3.8`) and building/packaging assemblies with `-p:Version=2.3.8`.
+
+### Key Changes
+
+* Modified GitHub Action triggers in `.github/workflows/dotnet.yml` to include `tags: [ "v*" ]`.
+* Modified publish job logic to run on git tag pushes and dynamically feed the version parameter to `dotnet pack`.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 配置 GitHub Actions 自动通过 Git Tag 发布 NuGet 包
+
+### 🎯 最终目标
+
+* 修改 `.github/workflows/dotnet.yml` 通道触发与发布判定，使发布任务在推送 `v*` 标签时运行，并成功动态提取版本号执行 NuGet 打包。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] [.github/workflows/dotnet.yml](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.github/workflows/dotnet.yml) (原因：更新工作流的触发规则与打包步骤)
+* \[x] [.vuepress\_docs/docs/versions/v2.3.8.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v2.3.8.md) (原因：创建并管理版本记录文件)
+
+### 📝 Steps
+
+* \[x] Step 1: 创建 `v2.3.8.md` 并锁定上下文与 Task Board
+* \[x] Step 2: 修改 `.github/workflows/dotnet.yml` 以支持 `v*` 标签触发及打包版本号动态提取
+* \[x] Step 3: 更新 Task Board 并归档为 Release 记录
+
+\------details end------

@@ -1,0 +1,134 @@
+---
+url: /docs/4uqwr9yo/index.md
+---
+# 连接自愈管理器 (IConnectionManager)
+
+## 概述 (Overview)
+
+连接自愈管理器 `IConnectionManager` 是 UniCon 核心框架中负责所有南向物理驱动生命周期装载、连接自愈拉起、在线状态查询及优雅注销的统一中心组件。它彻底解耦了具体驱动与北向业务层，并提供基于 `Task` 的完备异步生命周期管理能力。
+
+由于所有继承自 `DriverBase` 的驱动实例均内置了高并发 Watchdog 线程，`IConnectionManager` 在拉起初始连接后，将连接状态的健康监测与指数退避重连托管给驱动内部完成，自身则作为运行中实例的全局物理句柄托管中心。
+
+**重要**：在 `AddUniCon()` 已注册的项目中，推荐通过 `IDriverRegistry.CreateDriver()` 工厂方法创建驱动（所有依赖由 DI 自动装配），而不是手动 `new` 驱动实例。
+
+## 使用方法 (Usage)
+
+在外部项目中，无需手动装配。只需通过核心库提供的依赖注入扩展方法进行一键注册：
+
+```csharp
+// 在 Program.cs 中一键初始化全套组件
+builder.Services.AddUniCon();
+```
+
+注册后，可在任何控制器、服务或后台任务中通过构造函数注入使用：
+
+```csharp
+public class Worker
+{
+    private readonly IConnectionManager _connectionManager;
+
+    public Worker(IConnectionManager connectionManager)
+    {
+        _connectionManager = connectionManager;
+    }
+}
+```
+
+## 参数说明 (Parameters)
+
+### 1. 异步注册并激活驱动 (RegisterDriverAsync)
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| driver | `IUniconDriver` | 需要托管并激活的驱动实例 | 是 | 无 |
+| connectionString | `string` | 对应工控驱动专用的连接配置字符串 | 是 | 无 |
+| ct | `CancellationToken` | 异步控制令牌 | 否 | `default` |
+
+### 2. 异步注销并关闭驱动 (UnregisterDriverAsync)
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| driverId | `string` | 驱动唯一标识 ID | 是 | 无 |
+| ct | `CancellationToken` | 异步控制令牌 | 否 | `default` |
+
+***
+
+## 返回值 (Returns)
+
+### 1. RegisterDriverAsync & UnregisterDriverAsync
+
+| 类型 | 说明 |
+|------|------|
+| `Task` | 异步处理任务契约，可配合 `await` 等待连接就绪或连接断开释放 |
+
+### 2. GetDriver
+
+| 类型 | 说明 |
+|------|------|
+| `IUniconDriver?` | 返回被托管的驱动实例物理引用；若指定 ID 不存在或已被销毁，则返回 `null` |
+
+***
+
+## 使用示例 (Examples)
+
+**示例 1：后台 Worker 通过 Registry 工厂创建并托管 S7 驱动（推荐）**
+
+```csharp
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using UniCon.Core;
+
+public class S7ConnectorService : BackgroundService
+{
+    private readonly IDriverRegistry _driverRegistry;
+    private readonly IConnectionManager _connectionManager;
+
+    public S7ConnectorService(IDriverRegistry driverRegistry, IConnectionManager connectionManager)
+    {
+        _driverRegistry = driverRegistry;
+        _connectionManager = connectionManager;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // 通过工厂创建驱动，DI 自动注入 ILogger、IUniconCacheProvider、INetworkMonitor
+        var driver = _driverRegistry.CreateDriver("S7", "Line1_PLC");
+        _driverRegistry.Register(driver);
+
+        // 异步拉起连接，失败后 Watchdog 自动指数退避自愈重连
+        await _connectionManager.RegisterDriverAsync(
+            driver,
+            "CpuType=S71500;Ip=192.168.0.10;Rack=0;Slot=1",
+            stoppingToken
+        );
+
+        // 查询设备运行状态
+        var registeredDriver = _connectionManager.GetDriver("Line1_PLC");
+        if (registeredDriver != null)
+        {
+            Console.WriteLine($"驱动状态: {registeredDriver.State}, 是否连通: {registeredDriver.IsConnected}");
+        }
+    }
+}
+```
+
+**示例 2：运行时动态注销驱动**
+
+```csharp
+// 注销后驱动的 Watchdog 线程停止、Socket 连接关闭、资源释放
+await _connectionManager.UnregisterDriverAsync("Line1_PLC");
+```
+
+**示例 3：监听驱动状态变化**
+
+```csharp
+var driver = _connectionManager.GetDriver("Line1_PLC");
+if (driver != null)
+{
+    driver.StateChanged += (_, e) =>
+    {
+        Console.WriteLine($"[{e.DriverId}] {e.OldState} → {e.NewState}");
+        // 可在此触发告警、日志上报等北向联动
+    };
+}
+```

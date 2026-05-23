@@ -1,0 +1,45 @@
+---
+url: /versions/v2.3.4/index.md
+---
+# v2.3.4 — 优化项目根目录 README.md 说明文档 (v2.3.4)
+
+**日期**：2026-05-23
+**类型**：Docs
+
+***
+
+## \[v2.3.4] - 2026-05-23
+
+### Added / Changed
+
+* **Documentation**: Completely refactored and optimized the main `README.md` at the project's root with a premium layout, beautiful SVG badges, architectural description, technology stack table, standard cross-platform environmental setup, a clean .NET 10 async S7 subscription code sample, an elegant folder structure map, contribution rules, and MIT license details.
+
+### Key Changes
+
+* Redesigned `README.md` using professional markdown styling and clear visual hierarchies.
+* Added comprehensive instructions for new contributors, including clean coding expectations and local setup commands.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 优化项目根目录 README.md 说明文档
+
+### 🎯 最终目标
+
+* 重构并美化项目根目录下的 `README.md`，使其结构优美、视觉高端、信息清晰且符合顶尖开源项目门面标准。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] [README.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/README.md) (原因：重构项目主说明文档)
+* \[x] [.vuepress\_docs/docs/versions/v2.3.4.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v2.3.4.md) (原因：创建并管理版本记录文件)
+
+### 📝 Steps
+
+* \[x] Step 1: 创建 `v2.3.4.md` 并锁定上下文与 Task Board
+* \[x] Step 2: 重新设计并替换项目根目录的 `README.md`，融入精致的排版设计和高价值的技术栈介绍
+* \[x] Step 3: 更新 Task Board 并归档为 Release 记录
+
+\------details end------

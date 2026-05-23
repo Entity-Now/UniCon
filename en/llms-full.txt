@@ -1,0 +1,1329 @@
+---
+url: /en/docs/index.md
+---
+# UniCon Project Introduction
+
+## Overview
+
+UniCon (Universal Connection) is a high-performance, pluggable .NET industrial IoT communication integration framework. It is specifically designed for industrial edge gateways, SCADA platforms, and digital twin systems, running on .NET 10+.
+
+By masking protocol differences through a unified southbound driver interface, the framework provides complete lifecycle management, self-healing reconnection mechanisms, an active polling subscription engine, and REST API northbound integration. This helps developers connect to various industrial protocol devices with minimal integration cost.
+
+## Core Value
+
+* **Protocol Abstraction**: Masks differences between S7, Modbus, OPC UA, MQTT, OPC UA PubSub, etc., through the unified `IUniconDriver` interface and `UniconRequest` / `UniconResponse<T>` request-response models.
+* **Connection Self-Healing**: `DriverBase` features a built-in Watchdog self-healing thread that supports network disruption awareness (`INetworkMonitor`) and exponential backoff reconnection. Connections hang during disruption and heal automatically upon recovery.
+* **High-Performance Scan Scheduling**: Built on the `ScanScheduler` using a minimum waiting time algorithm, utilizing `Channel<T>` to asynchronously decouple acquisition and callback threads. The `IScanStrategy` pattern supports both `ExceptionBased` (deadband filtering) and `Polled` modes.
+* **Object-Device Mapping (ODM)**: An ORM-like design that automatically binds business entity properties to device registers via `[UniconDevice]` and `[UniconAddress]` attributes, avoiding hardcoded read/write logic.
+* **Task Scheduling System**: Highly encapsulated based on Quartz.NET, providing built-in scheduled tasks like `HttpJob` and `CommunicationJob`, and supporting dynamic runtime CRUD management.
+* **REST API Northbound Integration**: Based on ASP.NET Core Minimal API, offering a full suite of endpoints for driver management, data read/write, subscription control, ODM mapping, and task scheduling.
+* **Pluggable Caching**: Features a built-in `MemoryCacheProvider` (based on `ConcurrentDictionary`), which can be seamlessly replaced with a distributed implementation like Redis.
+
+## Project Architecture
+
+```
+UniCon
+├── UniCon.Core              # Core contracts, scheduling engine, ODM, cache, tasks
+├── UniCon.Drivers.S7        # Siemens S7 driver (S7.Net)
+├── UniCon.Drivers.Modbus    # Modbus TCP driver (EasyModbus)
+├── UniCon.Drivers.OpcUa     # OPC UA client driver (Workstation.UaClient)
+├── UniCon.Drivers.Mqtt      # MQTT pub/sub driver (MQTTnet)
+├── UniCon.Drivers.OpcUaPubSub  # OPC UA PubSub UDP/MQTT connectionless driver
+└── UniCon.WebServer         # Minimal API host (driver management, ODM, task APIs)
+```
+
+## Supported Industrial Protocols
+
+| Driver | Protocol / Standard | Underlying Library | Driver Alias |
+|------|------------|--------|---------|
+| `S7Driver` | Siemens S7 (ISO-on-TCP) S7-200/300/1200/1500 | S7.Net | `"S7"` |
+| `ModbusDriver` | Modbus TCP (Coil/Holding/Input/Discrete registers) | EasyModbus | `"Modbus"` |
+| `OpcUaDriver` | OPC UA Client/Server (Anonymous/Account/Certificate) | Workstation.UaClient | `"OpcUa"` |
+| `MqttDriver` | MQTT 3.1/5.0 Pub/Sub (TLS optional) | MQTTnet | `"Mqtt"` |
+| `OpcUaPubSubDriver` | OPC UA PubSub UDP Multicast / MQTT (UADP/JSON) | In-house | `"OpcUaPubSub"` |
+
+## Target Audience
+
+Designed for developers who need to integrate multiple industrial devices (PLCs, OPC UA Servers, Modbus meters, MQTT Brokers, etc.) for data collection, routing, analysis, or presentation. It is especially suited for industrial edge gateways, digital twin platforms, and IoT integration system scenarios.
+
+---
+
+---
+url: /en/docs/0efv5vxf/index.md
+---
+# Core Architecture
+
+## Overview
+
+The Core module is the heart of UniCon. It defines all system contracts, model structures, base self-healing services, unified caching, and the IoC registration entry point.
+
+## Key Features
+
+* **Interface Definition (`IUniconDriver`)**: The unified southbound driver contract, covering instant read/write, batch read/write, keep-alive probing, async subscriptions, state change events, and runtime statistics queries.
+* **Message Models**: `UniconRequest` / `UniconResponse<T>` for structured interaction; `DataValue<T>` carries `SourceTimestamp` (PLC time), `ServerTimestamp` (gateway arrival time), `DataStatus`, and `QualityCode` (OPC UA-compatible quality code).
+* **Driver Registry (`IDriverRegistry`)**: Unified sharing, dynamic querying, and status polling for all driver instances across the system.
+* **Connection Self-Healing Manager (`IConnectionManager`)**: Manages the physical connections of all drivers throughout their entire lifecycle, working in conjunction with the driver's built-in Watchdog exponential backoff reconnection mechanism.
+* **Object-Device Mapping Engine (`OdmEngine`)**: An ORM-like design that automatically maps business entity properties to device register addresses via strongly-typed attributes, enabling dynamic read/write without hardcoding.
+* **Scan Scheduling Engine (v2)**:
+  * `ScanGroupRegistry`: Pre-groups subscriptions by `(ScanRate, ScanMode)` on registration, deduplicating addresses.
+  * `ScanScheduler`: Dynamically schedules expired `ScanGroup`s using a minimum-wait-time algorithm, replacing the `while(true)+Delay(50)` full-scan approach.
+  * `NotificationDispatcher`: `Channel<T>` async dispatch with independent consumer threads; callback exceptions are isolated and do not affect the scan thread.
+  * `IScanStrategy`: Strategy pattern replacing `if(ScanMode==...)` branches, with built-in `ExceptionBased` (deadband support) and `Polled` implementations.
+* **Tag Metadata (`TagMetadata`)**: Describes a tag's data type, read/write permissions, engineering units, linear scaling, and deadband threshold.
+* **Runtime Statistics (`ScanStatistics`)**: Collects each `ScanGroup`'s scan count, notification count, average read duration, and error rate in a lock-free manner using `Interlocked`.
+* **Transport Layer Abstraction (`ITransport`)**: Separates byte transmission from protocol parsing, supporting concurrent reads/exclusive writes with lock granularity pushed down to the Transport layer.
+* **Pluggable Cache (`IUniconCacheProvider`)**: DI-injected (non-static), with a built-in `MemoryCacheProvider` that can be replaced with a distributed implementation like Redis.
+* **Out-of-the-Box Integration (`ServiceCollectionExtensions`)**: A one-click `AddUniCon()` extension that registers the driver registry, connection manager, cache, and more into the IoC container as singletons.
+* **Connection Builder (`ConnectionStringBuilder`)**: A strongly-typed, fluent API for dynamically assembling connection strings for each protocol.
+
+---
+
+---
+url: /en/docs/0iiw0cmj/index.md
+---
+# Connection String Builder (ConnectionStringBuilder)
+
+## Overview
+
+`ConnectionStringBuilder` is a utility class provided by the UniCon Core layer. It offers a strongly-typed, fluent (chainable) interface for dynamically assembling connection strings for various industrial protocols (S7, Modbus, MQTT, OPC UA, PubSub), completely eliminating syntax errors caused by manual string concatenation and greatly improving development efficiency.
+
+The framework also provides quick connection extension methods for `IUniconDriver` (e.g., `ConnectS7Async`) that can be called directly on a driver instance without manually building a connection string.
+
+## Usage
+
+Create a protocol-specific Builder instance via the static entry of `ConnectionStringBuilder`, set properties in a chain, and call `Build()` to generate the connection string. Alternatively, use the quick extension methods directly on driver instances.
+
+## Parameters
+
+### S7Builder Parameters
+
+| Parameter | Type | Description | Required | Default |
+|--------|------|------|----------|--------|
+| cpuType | `S7CpuType` | PLC CPU type enum (`S7200`, `S7300`, `S7400`, `S71200`, `S71500`) | Yes | `S7CpuType.S71200` |
+| ip | `string` | PLC IP address | Yes | `127.0.0.1` |
+| rack | `short` | Rack number | No | `0` |
+| slot | `short` | Slot number | No | `1` |
+
+### ModbusBuilder Parameters
+
+| Parameter | Type | Description | Required | Default |
+|--------|------|------|----------|--------|
+| ip | `string` | Modbus slave or gateway IP address | Yes | `127.0.0.1` |
+| port | `int` | Modbus service port | No | `502` |
+
+### OpcUaPubSubBuilder Parameters
+
+| Parameter | Type | Description | Required | Default |
+|--------|------|------|----------|--------|
+| scheme | `PubSubScheme` | Transport scheme (`Udp`, `Mqtt`) | Yes | `PubSubScheme.Udp` |
+| host | `string` | Multicast IP or Broker IP | Yes | `224.0.2.14` |
+| port | `int` | Port number | Yes | `4840` |
+| topic | `string` | MQTT subscription topic path (valid only in MQTT mode) | No | `""` |
+
+## Returns
+
+### Build() Return Value
+
+| Type | Description |
+|------|------|
+| `string` | A fully assembled, correctly formatted physical connection string |
+
+### Quick Connection Extension Methods (e.g., ConnectS7Async)
+
+| Type | Description |
+|------|------|
+| `Task<bool>` | Async boolean indicating whether the initial connection succeeded |
+
+## Examples
+
+**Example 1: Build an S7 connection string using the strongly-typed fluent API**
+
+```csharp
+using UniCon.Core.Helpers;
+
+string connStr = ConnectionStringBuilder.S7()
+    .WithCpuType(S7CpuType.S71500)
+    .WithIp("192.168.1.10")
+    .WithRack(0)
+    .WithSlot(1)
+    .Build();
+// Output: CpuType=S71500;Ip=192.168.1.10;Rack=0;Slot=1
+```
+
+**Example 2: Use the quick connection extension method directly (Recommended)**
+
+In projects using `IDriverRegistry`, drivers are created via factory (DI auto-assembles dependencies):
+
+```csharp
+using UniCon.Core;
+using UniCon.Core.Helpers;
+
+// Create driver via DI factory (automatically assembles all dependencies)
+var driver = _driverRegistry.CreateDriver("S7", "Line1_PLC");
+_driverRegistry.Register(driver);
+
+// Strongly-typed, self-documenting quick connection extension method
+bool isConnected = await driver.ConnectS7Async("192.168.1.10", S7CpuType.S71500);
+```
+
+**Example 3: Build a Modbus connection string**
+
+```csharp
+string connStr = ConnectionStringBuilder.Modbus()
+    .WithIp("192.168.0.50")
+    .WithPort(502)
+    .Build();
+// Output: ip=192.168.0.50;port=502
+```
+
+**Example 4: Build an OPC UA PubSub UDP multicast connection string**
+
+```csharp
+string connStr = ConnectionStringBuilder.OpcUaPubSub()
+    .WithScheme(PubSubScheme.Udp)
+    .WithHost("224.0.2.14")
+    .WithPort(4840)
+    .Build();
+// Output: opc.udp://224.0.2.14:4840
+```
+
+---
+
+---
+url: /en/docs/16mq4fzn/index.md
+---
+# Job System
+
+## Overview
+
+The UniCon Job Scheduling System is a task scheduling framework designed specifically for industrial-grade edge gateways and high-concurrency communication, built on a deep integration and encapsulation of Quartz.NET. The system perfectly supports the C# 10+ asynchronous programming model and provides out-of-the-box infrastructure for scheduling periodic edge device data uploads, third-party API interactions, and background communication link maintenance.
+
+## Module Responsibilities and Goals
+
+* **Decoupling Physical Points & Jobs**: Allows users to orchestrate jobs to automatically read or write physical channel data periodically at specific time intervals.
+* **Rich Built-in Job Library**: Provides job templates for various scenarios such as HTTP requests, system self-healing cleanups, and southbound driver real-time read/write operations.
+* **Dynamic Lifecycle Control (CRUD)**: Supports dynamically adding, modifying, pausing, resuming, and deleting jobs at runtime, while providing precise counts of active running jobs.
+* **Zero-Friction IoC Integration**: Offers a one-click dependency injection extension that automatically scans and registers all `IJob` implementations, achieving truly minimalist integration.
+
+## Major Features and Documents
+
+| File / Component | Responsibility Description |
+|-----------------|----------------------------|
+| [1.intro.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/en/docs/4.%20jobs/1.intro.md) | This document, outlining the responsibilities, architecture, and features of the Job System. |
+| [2.http-job.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/en/docs/4.%20jobs/2.http-job.md) | High-reliability HTTP communication job for periodic third-party RESTful API interactions. |
+| [3.communication-job.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/en/docs/4.%20jobs/3.communication-job.md) | Southbound communication job for periodic read/write interactions with UniCon device points. |
+| [4.job-scheduler.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/en/docs/4.%20jobs/4.job-scheduler.md) | Documentation for the core job manager API, containing CRUD operations, state statistics, and dependency injection guides. |
+
+## IoC Injection and Initialization
+
+The system provides a highly elegant, one-click extension method `AddUniConJobs()` for `IServiceCollection`:
+
+```csharp
+// Inject the scheduling system into the DI container, automatically scanning and loading all IJob tasks
+builder.Services.AddUniConJobs();
+
+var app = builder.Build();
+
+// Start the job scheduler
+var scheduler = app.Services.GetRequiredService<JobScheduler>();
+await scheduler.StartAsync();
+```
+
+---
+
+---
+url: /en/docs/4uqwr9yo/index.md
+---
+# Connection Self-Healing Manager (IConnectionManager)
+
+## Overview
+
+The Connection Self-Healing Manager `IConnectionManager` is a unified central component in the UniCon core framework responsible for loading all southbound physical driver lifecycles, initiating connection self-healing, querying online status, and gracefully unregistering drivers. It completely decouples specific drivers from the northbound business layer, and provides comprehensive `Task`-based async lifecycle management.
+
+Since all driver instances inheriting from `DriverBase` have a built-in high-concurrency Watchdog thread, once `IConnectionManager` starts the initial connection, health monitoring and exponential backoff reconnection are delegated to the driver's internal mechanism. `IConnectionManager` itself acts as a global physical handle registry for running instances.
+
+**Important**: In projects where `AddUniCon()` has already been registered, it is recommended to create drivers via `IDriverRegistry.CreateDriver()` factory method (all dependencies are auto-assembled by DI), rather than manually calling `new` on a driver instance.
+
+## Usage
+
+In external projects, no manual assembly is needed. Register everything with a single one-click DI extension method:
+
+```csharp
+// One-click initialization of all components in Program.cs
+builder.Services.AddUniCon();
+```
+
+After registration, inject via constructor in any controller, service, or background task:
+
+```csharp
+public class Worker
+{
+    private readonly IConnectionManager _connectionManager;
+
+    public Worker(IConnectionManager connectionManager)
+    {
+        _connectionManager = connectionManager;
+    }
+}
+```
+
+## Parameters
+
+### 1. Register and Activate Driver Async (RegisterDriverAsync)
+
+| Parameter | Type | Description | Required | Default |
+|--------|------|------|----------|--------|
+| driver | `IUniconDriver` | The driver instance to register and activate | Yes | — |
+| connectionString | `string` | The protocol-specific connection string | Yes | — |
+| ct | `CancellationToken` | Async cancellation token | No | `default` |
+
+### 2. Unregister and Disconnect Driver Async (UnregisterDriverAsync)
+
+| Parameter | Type | Description | Required | Default |
+|--------|------|------|----------|--------|
+| driverId | `string` | Unique driver identifier | Yes | — |
+| ct | `CancellationToken` | Async cancellation token | No | `default` |
+
+***
+
+## Returns
+
+### 1. RegisterDriverAsync & UnregisterDriverAsync
+
+| Type | Description |
+|------|------|
+| `Task` | Async task contract; can be `await`-ed to wait for connection establishment or disconnection |
+
+### 2. GetDriver
+
+| Type | Description |
+|------|------|
+| `IUniconDriver?` | Returns the physical reference of the managed driver instance; `null` if the specified ID does not exist or has been destroyed |
+
+***
+
+## Examples
+
+**Example 1: Background Worker creates and manages an S7 driver via Registry factory (Recommended)**
+
+```csharp
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using UniCon.Core;
+
+public class S7ConnectorService : BackgroundService
+{
+    private readonly IDriverRegistry _driverRegistry;
+    private readonly IConnectionManager _connectionManager;
+
+    public S7ConnectorService(IDriverRegistry driverRegistry, IConnectionManager connectionManager)
+    {
+        _driverRegistry = driverRegistry;
+        _connectionManager = connectionManager;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // Create driver via factory; DI automatically injects ILogger, IUniconCacheProvider, INetworkMonitor
+        var driver = _driverRegistry.CreateDriver("S7", "Line1_PLC");
+        _driverRegistry.Register(driver);
+
+        // Start connection asynchronously; Watchdog auto-heals with exponential backoff on failure
+        await _connectionManager.RegisterDriverAsync(
+            driver,
+            "CpuType=S71500;Ip=192.168.0.10;Rack=0;Slot=1",
+            stoppingToken
+        );
+
+        // Query device status
+        var registeredDriver = _connectionManager.GetDriver("Line1_PLC");
+        if (registeredDriver != null)
+        {
+            Console.WriteLine($"Driver State: {registeredDriver.State}, Connected: {registeredDriver.IsConnected}");
+        }
+    }
+}
+```
+
+**Example 2: Dynamically unregister a driver at runtime**
+
+```csharp
+// After unregistering, the driver's Watchdog thread stops, socket connection closes, and resources are released
+await _connectionManager.UnregisterDriverAsync("Line1_PLC");
+```
+
+**Example 3: Listen to driver state changes**
+
+```csharp
+var driver = _connectionManager.GetDriver("Line1_PLC");
+if (driver != null)
+{
+    driver.StateChanged += (_, e) =>
+    {
+        Console.WriteLine($"[{e.DriverId}] {e.OldState} → {e.NewState}");
+        // Can trigger alerts, log reporting, and other northbound linkages here
+    };
+}
+```
+
+---
+
+---
+url: /en/docs/5mlpfn5w/index.md
+---
+# HTTP Job (HttpJob)
+
+## Overview
+
+`HttpJob` is a built-in HTTP request scheduled task in UniCon, implemented using `IHttpClientFactory` and supporting all standard HTTP methods including GET, POST, PUT, and DELETE. It allows configuration of request headers, query parameters, and request body, making it ideal for sending data or heartbeat packets to cloud platform Webhooks or RESTful APIs periodically.
+
+The job execution results are recorded in the logging system without throwing exceptions (gracefully degrading to logs on error), ensuring the stability of the scheduler.
+
+## Usage
+
+Register the task through `JobScheduler.ScheduleJobAsync<HttpJob>()` and pass parameters using the `JobDataMap`:
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "PushDataToCloud",
+    cronExpression: "0 0/5 * * * ?",
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]    = "https://api.example.com/v1/data",
+        [JobDataKeys.HttpMethod] = "POST",
+        [JobDataKeys.HttpBody]   = "{\"deviceId\": \"PLC_01\", \"status\": \"running\"}",
+        [JobDataKeys.HttpHeaders]= "{\"Authorization\": \"Bearer token123\", \"Content-Type\": \"application/json\"}"
+    }
+);
+```
+
+## Parameters
+
+Pass the following key-value pairs through `JobDataMap` (recommended to use the `JobDataKeys` constant class to avoid spelling errors):
+
+| JobDataKeys Constant | Actual Key Name | Type | Description | Required | Default Value |
+|-----------------|---------|------|------|----------|--------|
+| `JobDataKeys.HttpUrl` | `Job_Http_Url` | `string` | Target URL | Yes | — |
+| `JobDataKeys.HttpMethod` | `Job_Http_Method` | `string` | HTTP Request Method (`GET`, `POST`, `PUT`, `DELETE`, etc.) | No | `"GET"` |
+| `JobDataKeys.HttpHeaders` | `Job_Http_Headers` | `string` | JSON-serialized request headers dictionary `Dictionary<string, string>` | No | None |
+| `JobDataKeys.HttpQueryParams` | `Job_Http_QueryParams` | `string` | JSON-serialized query parameters dictionary `Dictionary<string, string>` | No | None |
+| `JobDataKeys.HttpBody` | `Job_Http_Body` | `string` | Request body string (always sent with `application/json` encoding) | No | None |
+
+## Returns
+
+`HttpJob` executes asynchronously and has no direct return value. Execution results are logged through the logging system:
+
+| Condition | Log Level | Content |
+|------|---------|------|
+| Execution Start | `Information` | `Executing HttpJob: {Method} {Url}` |
+| Execution Success | `Information` | `HttpJob response: {StatusCode}` |
+| URL Empty | `Warning` | `HttpJob skipped: URL is null or empty.` |
+| Execution Failure | `Error` | `HttpJob request failed. {Exception}` |
+| Query Parameters Parse Failure | `Error` | `Failed to parse HttpJob query parameters. {Exception}` |
+| Request Headers Parse Failure | `Error` | `Failed to apply HttpJob headers. {Exception}` |
+
+## Examples
+
+**Example 1: POST data to cloud Webhook every 5 minutes**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "PushDataToCloud",
+    cronExpression: "0 0/5 * * * ?",  // Every 5 minutes
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]     = "https://api.example.com/v1/data",
+        [JobDataKeys.HttpMethod]  = "POST",
+        [JobDataKeys.HttpBody]    = "{\"deviceId\": \"PLC_01\", \"status\": \"running\"}",
+        [JobDataKeys.HttpHeaders] = "{\"Authorization\": \"Bearer token123\"}"
+    }
+);
+```
+
+**Example 2: Scheduled GET request with query parameters**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "QueryCloudConfig",
+    cronExpression: "0 0 * * * ?",  // Hourly
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]         = "https://config.example.com/api/settings",
+        [JobDataKeys.HttpMethod]      = "GET",
+        [JobDataKeys.HttpQueryParams] = "{\"gatewayId\": \"GW_01\", \"version\": \"2\"}"
+    }
+);
+```
+
+**Example 3: Heartbeat detection GET request every 5 minutes**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "Heartbeat",
+    cronExpression: "0 0/5 * * * ?",
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]    = "https://api.example.com/heartbeat",
+        [JobDataKeys.HttpMethod] = "GET"
+    }
+);
+```
+
+---
+
+---
+url: /en/docs/77hr4gzb/index.md
+---
+# Communication Job (CommunicationJob)
+
+## Overview
+
+`CommunicationJob` is a built-in device communication scheduled task in UniCon. It retrieves registered driver instances via `IDriverRegistry` and executes **periodic read** or **periodic write** operations on target physical device addresses when triggered by a specified Cron expression.
+
+The read/write results are recorded in the logging system. The task utilizes `context.CancellationToken` provided by Quartz to handle task cancellation and employs reflection to support read/write calls for arbitrary generic data types.
+
+> **Prerequisite**: The target driver must already be registered via `IDriverRegistry.Register()` and its connection state must be online (`IsConnected == true`); otherwise, the task will skip execution.
+
+## Usage
+
+Register the task through `JobScheduler.ScheduleJobAsync<CommunicationJob>()` and pass parameters using the `JobDataMap`:
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadTemperature",
+    cronExpression: "0/10 * * * * ?",  // Every 10 seconds
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBD0",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Single"  // float
+    }
+);
+```
+
+## Parameters
+
+Pass the following key-value pairs through `JobDataMap` (accessed via the `JobDataKeys` constant class):
+
+| JobDataKeys Constant | Actual Key Name | Type | Description | Required | Default Value |
+|-----------------|---------|------|------|----------|--------|
+| `JobDataKeys.CommDriverId` | `Job_Comm_DriverId` | `string` | The registered driver's unique ID (must be registered and online) | Yes | — |
+| `JobDataKeys.CommAddress` | `Job_Comm_Address` | `string` | Target communication address (format is protocol-dependent, e.g., `DB1.DBD0`, `holding:1`) | Yes | — |
+| `JobDataKeys.CommOperation` | `Job_Comm_Operation` | `string` | Operation type: `"Read"` or `"Write"` (case-insensitive) | No | `"Read"` |
+| `JobDataKeys.CommValue` | `Job_Comm_Value` | `object` | Target value to write (Required for Write operations) | No | `null` |
+| `JobDataKeys.CommDataType` | `Job_Comm_DataType` | `string` | Full name of the data type (e.g., `"System.Single"`, `"System.Boolean"`, `"System.Int16"`) | No | `"System.Object"` |
+
+## Returns
+
+`CommunicationJob` executes asynchronously, and results are recorded in the logging system:
+
+| Condition | Log Level | Content |
+|------|---------|------|
+| Read Completed | `Information` | `Read Response: {UniconResponse}` |
+| Write Completed | `Information` | `Write Response: {UniconResponse}` |
+| Driver Missing/Disconnected | — | Task silently skipped (no log) |
+| Execution Exception | `Error` | `CommunicationJob failed for {driverId}` |
+
+## Examples
+
+**Example 1: Periodic S7 temperature reading (float) every 10 seconds**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadTemperature",
+    cronExpression: "0/10 * * * * ?",
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBD0",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Single"
+    }
+);
+```
+
+**Example 2: Automatic PLC counter reset (writing 0) at midnight daily**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ResetDailyCounter",
+    cronExpression: "0 0 0 * * ?",  // Daily at 00:00:00
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBW10",
+        [JobDataKeys.CommOperation] = "Write",
+        [JobDataKeys.CommValue]     = 0,
+        [JobDataKeys.CommDataType]  = "System.Int16"
+    }
+);
+```
+
+**Example 3: Modbus meter current reading (int) every minute**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadMeterCurrent",
+    cronExpression: "0 * * * * ?",  // Every minute
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "Meter_01",
+        [JobDataKeys.CommAddress]   = "holding:30001",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Int32"
+    }
+);
+```
+
+**Example 4: Publish gateway heartbeat to MQTT every 30 seconds**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "MqttHeartbeat",
+    cronExpression: "0/30 * * * * ?",  // Every 30 seconds
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "Cloud_Broker",
+        [JobDataKeys.CommAddress]   = "gateway/heartbeat",
+        [JobDataKeys.CommOperation] = "Write",
+        [JobDataKeys.CommValue]     = "{\"status\": \"alive\"}",
+        [JobDataKeys.CommDataType]  = "System.String"
+    }
+);
+```
+
+---
+
+---
+url: /en/docs/7nj6xtl2/index.md
+---
+# Job Scheduler
+
+## Overview
+
+`JobScheduler` is the core manager of the UniCon Job System. Highly encapsulated based on Quartz.NET, it aims to provide highly reliable, fine-grained cron job execution and management for southbound driver register interactions, northbound HTTP api triggers, and background system self-healing.
+
+It resolves the following problems:
+
+1. Provides complete scheduled task lifecycle management (CRUD).
+2. Supports high-precision CRON triggers at the second level.
+3. Tracks the count of currently active running tasks for system performance monitoring.
+4. Seamlessly supports ASP.NET Core Dependency Injection (DI) and Minimal Web APIs.
+
+## Usage
+
+Complete container registration using the elegant one-click extension method `AddUniConJobs()` on `IServiceCollection`, then call it by injecting `JobScheduler` into your constructors.
+
+```csharp
+// 1. Inject in Program.cs
+builder.Services.AddUniConJobs();
+
+// 2. Inject and use via constructor
+public class MyService
+{
+    private readonly JobScheduler _scheduler;
+    public MyService(JobScheduler scheduler)
+    {
+        _scheduler = scheduler;
+    }
+}
+```
+
+## Parameters
+
+### `ScheduleJobAsync<T>` Parameters
+
+| Parameter | Type | Description | Required | Default Value |
+|--------|------|------|----------|--------|
+| jobId | `string` | Unique identifier ID of the job | Yes | - |
+| cronExpression | `string` | Standard Quartz CRON trigger expression | Yes | - |
+| data | `JobDataMap` | External parameter mapping accompanying the job execution | No | `null` |
+
+### `UpdateJobAsync` Parameters
+
+| Parameter | Type | Description | Required | Default Value |
+|--------|------|------|----------|--------|
+| jobId | `string` | Unique identifier ID of the job | Yes | - |
+| cronExpression | `string` | New standard Quartz CRON trigger expression | Yes | - |
+| data | `JobDataMap` | New external parameter mapping; updates if not null | No | `null` |
+
+## Returns
+
+### `GetExecutingJobsCountAsync` Returns
+
+| Type | Description |
+|------|------|
+| `Task<int>` | Total number of jobs currently in the running state. |
+
+### `GetJobsAsync` Returns
+
+| Type | Description |
+|------|------|
+| `Task<List<JobInfo>>` | List of all scheduled job metadata and their execution states. |
+
+### `UpdateJobAsync` / `DeleteJobAsync` Returns
+
+| Type | Description |
+|------|------|
+| `Task<bool>` | Indicates whether the operation succeeded (returns `false` if the specified Job is not found). |
+
+## Examples
+
+**Example 1: Dynamically register and schedule an HttpJob**
+
+```csharp
+var jobData = new JobDataMap
+{
+    [JobDataKeys.HttpUrl] = "https://api.unicontroller.com/heartbeat",
+    [JobDataKeys.HttpMethod] = "GET"
+};
+
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "ControllerHeartbeat",
+    cronExpression: "0 0/5 * * * ?", // Execute every 5 minutes
+    data: jobData
+);
+```
+
+**Example 2: Query all jobs and print to console**
+
+```csharp
+var jobs = await jobScheduler.GetJobsAsync();
+foreach (var job in jobs)
+{
+    Console.WriteLine($"Job: {job.JobId}, Type: {job.JobType}, Status: {job.Status}");
+}
+```
+
+**Example 3: Update trigger time and parameters of an existing job**
+
+```csharp
+var newJobData = new JobDataMap
+{
+    [JobDataKeys.HttpUrl] = "https://api.unicontroller.com/v2/heartbeat",
+    [JobDataKeys.HttpMethod] = "POST"
+};
+
+bool isUpdated = await jobScheduler.UpdateJobAsync(
+    jobId: "ControllerHeartbeat",
+    cronExpression: "0/30 * * * * ?", // Shortened to execute every 30 seconds
+    data: newJobData
+);
+```
+
+---
+
+---
+url: /en/docs/d7z01nn3/index.md
+---
+# Dynamic Driver API
+
+## Overview
+
+`CommunicationService` provides dynamic lifecycle management of communication drivers within the system, as well as strongly-typed, reflective read/write interactions executed through a unified gateway. External applications can perform hot-plugging of device tags and achieve unified data integration via RESTful APIs.
+
+## Usage
+
+Registered in the Dependency Injection (DI) container as a singleton, serving as the core processor for Minimal APIs or Controllers.
+
+## Parameters
+
+### 1. Driver Registration (CreateDriverRequest)
+
+| Parameter Name | Type | Description | Required |
+|----------------|------|-------------|----------|
+| DriverId | string | Global unique identifier (ID) of the driver | Yes |
+| DriverType | string | Protocol type (`S7`, `Modbus`, `OpcUa`, `Mqtt`, `OpcUaPubSub`) | Yes |
+| ConnectionString | string | Physical connection string | Yes |
+
+### 2. Strongly-Typed Read (Read Tag)
+
+| Parameter Name | Type | Description | Required |
+|----------------|------|-------------|----------|
+| address | string | Physical communication address | Yes |
+| type | string | Target data type indicator (e.g., `int`, `float`, `string`) | No |
+
+### 3. Strongly-Typed Write (WriteAddressRequest)
+
+| Parameter Name | Type | Description | Required |
+|----------------|------|-------------|----------|
+| Address | string | Physical communication address | Yes |
+| Value | object | Value to write (JSON format) | Yes |
+| TypeHint | string | Strong type mapping hint (used for precise byte stream serialization) | No |
+
+***
+
+## Returns
+
+### Data Read Structure (DataValue\<object>)
+
+| Property Name | Type | Description |
+|---------------|------|-------------|
+| Value | object? | The strongly-typed physical data read from the device |
+| Status | string | Data status stamp (`Good`, `Bad`, `Uncertain`, `Timeout`) |
+| Quality | string | OPC UA compatible 16-bit quality code |
+| SourceTimestamp | DateTime | Timestamp generated by the data source / PLC |
+| ServerTimestamp | DateTime | Timestamp when the data was received by the gateway |
+
+***
+
+## Examples
+
+### Example 1: Dynamically Add and Connect an S7 Driver
+
+**POST /api/drivers**
+
+```json
+{
+  "driverId": "S7_CPU_01",
+  "driverType": "S7",
+  "connectionString": "CpuType=S71200;Ip=192.168.0.100;Rack=0;Slot=1"
+}
+```
+
+### Example 2: Reflective Strongly-Typed Read
+
+**GET /api/drivers/S7\_CPU\_01/read?address=DB1.DBD0\&type=float**
+
+```json
+{
+  "value": 45.28,
+  "status": 0,
+  "quality": 0,
+  "sourceTimestamp": "2026-05-18T00:46:12.345Z",
+  "serverTimestamp": "2026-05-18T00:46:12.350Z"
+}
+```
+
+### Example 3: Reflective Strongly-Typed Write
+
+**POST /api/drivers/S7\_CPU\_01/write**
+
+```json
+{
+  "address": "DB1.DBX4.0",
+  "value": true,
+  "typeHint": "bool"
+}
+```
+
+### Example 4: Subscription and Polling for Cached Data
+
+Note: Subscriptions in `CommunicationService` will automatically update the injected `IUniconCacheProvider` caching mechanism during callbacks.
+
+**POST /api/drivers/S7\_CPU\_01/subscribe**
+
+```json
+{
+  "address": "DB1.DBD8"
+}
+```
+
+**GET /api/drivers/S7\_CPU\_01/subscriptions**
+*(Extract the latest value from CacheProvider)*
+
+```json
+[
+  {
+    "driverId": "S7_CPU_01",
+    "address": "DB1.DBD8",
+    "value": 102.5,
+    "quality": "Good",
+    "timestamp": "2026-05-18T00:49:15.823Z"
+  }
+]
+```
+
+---
+
+---
+url: /en/docs/driver-registry/index.md
+---
+# Driver Registry & Factory
+
+## Overview
+
+`IDriverRegistry` is a core infrastructure component of the UniCon framework, responsible for two major duties:
+
+1. **Instance Lifecycle Management**: Maintains active driver instances at runtime (e.g., S7, Modbus), providing Register, Unregister, and Get APIs for cross-layer sharing.
+2. **Dynamic Factory & Hot-Plugging**: Automatically scans driver assemblies via the `[UniconDriver]` attribute, supporting alias registration and alias-based or strongly-typed driver instance creation without manual configuration.
+
+This registry combines the **Registry API** and **Factory API** to achieve unified driver management and zero-configuration assembly.
+
+## Usage
+
+### 1. Register Core Services
+
+Add UniCon core services to the dependency injection container in `Program.cs` (or `Startup.cs`):
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+// Automatically injects IDriverRegistry and the DriverRegistry implementation
+builder.Services.AddUniCon(); // Includes services.AddSingleton<IDriverRegistry, DriverRegistry>();
+```
+
+### 2. Auto-Discover Drivers on Startup
+
+After the application is built, call the auto-discovery method to complete plugin-style driver loading:
+
+```csharp
+var app = builder.Build();
+var driverRegistry = app.Services.GetRequiredService<IDriverRegistry>();
+driverRegistry.DiscoverAndRegisterDrivers(); // Automatically scans and registers all drivers marked with [UniconDriver]
+```
+
+### 3. Business Layer Usage
+
+```csharp
+public class PlcManager
+{
+    private readonly IDriverRegistry _driverRegistry;
+    private readonly IConnectionManager _connectionManager;
+
+    public PlcManager(IDriverRegistry driverRegistry, IConnectionManager connectionManager)
+    {
+        _driverRegistry = driverRegistry;
+        _connectionManager = connectionManager;
+    }
+
+    // See examples below
+}
+```
+
+## Parameters
+
+| Method | Parameter | Type | Description | Required | Default |
+|------|--------|------|------|----------|--------|
+| `Register` | `driver` | `IUniconDriver` | The driver instance to register | ✅ | — |
+| `Unregister` | `driverId` | `string` | Unique ID of the driver to unregister | ✅ | — |
+| `Get` | `driverId` | `string` | Query a registered driver instance | ✅ | — |
+| `RegisterDriverType` | `driverType` | `string` | Driver alias (e.g., `"S7"`) | ✅ | — |
+|  | `implementationType` | `Type` | The driver implementation class | ✅ | — |
+| `CreateDriver` (alias) | `driverType` | `string` | Driver type corresponding to the alias | ✅ | — |
+|  | `driverId` | `string` | Unique ID for the new instance | ✅ | — |
+| `CreateDriver<T>` | `driverId` | `string` | Unique ID for the strongly-typed driver instance | ✅ | — |
+| `DiscoverAndRegisterDrivers` | — | — | Automatically scans and registers all marked drivers | — | — |
+
+## Returns
+
+| Method | Type | Description |
+|------|------|------|
+| `Register` | `void` | No return; simply adds the instance to the registry |
+| `Unregister` | `bool` | Returns `true` on success, `false` if not found |
+| `Get` | `IUniconDriver?` | Returns the instance if found, otherwise `null` |
+| `GetAll` | `IEnumerable<IUniconDriver>` | A read-only collection of all active drivers |
+| `CreateDriver` | `IUniconDriver` | Creates and returns a driver instance by alias |
+| `CreateDriver<T>` | `T` where `T : IUniconDriver` | Creates and returns a strongly-typed driver instance |
+| `DiscoverAndRegisterDrivers` | `void` | No direct return value after auto-discovery |
+
+## Examples
+
+### Example 1: Zero-Friction Driver Creation & Registration using Generics
+
+```csharp
+public class PlcManager
+{
+    private readonly IDriverRegistry _driverRegistry;
+    private readonly IConnectionManager _connectionManager;
+
+    public PlcManager(IDriverRegistry driverRegistry, IConnectionManager connectionManager)
+    {
+        _driverRegistry = driverRegistry;
+        _connectionManager = connectionManager;
+    }
+
+    public async Task InitializeLine1PlcAsync()
+    {
+        // Create an S7 driver via generics; the framework automatically injects logger, cache, and other dependencies
+        var plcDriver = _driverRegistry.CreateDriver<S7Driver>("PLC_01");
+        // Register with the central registry
+        _driverRegistry.Register(plcDriver);
+        // Activate connection (example)
+        await _connectionManager.RegisterDriverAsync(plcDriver, "ip=192.168.1.100;cputype=S71200");
+    }
+}
+```
+
+### Example 2: Plug-and-Play Creation Based on Configuration Alias
+
+```csharp
+// Assume alias and ID are read from a database or configuration file
+string driverAlias = "S7"; // Driver type from business configuration
+string driverId = "PLC_Line2";
+
+// Assumes DiscoverAndRegisterDrivers() was called at application startup
+IUniconDriver driver = _driverRegistry.CreateDriver(driverAlias, driverId);
+_driverRegistry.Register(driver);
+```
+
+***
+
+> **Update Record**: This documentation is synchronized with `src/UniCon.Core/IDriverRegistry.cs` (v2.3), keeping interface signatures and example code consistent.
+
+---
+
+---
+url: /en/docs/e2s2408d/index.md
+---
+# Tag Endpoints
+
+## Usage
+
+Called by external HTTP clients to perform read/write operations on logical tags within the system.
+
+## Parameters
+
+* **GET /tags/{name}**:
+  * `name` (path): The logical tag name.
+* **POST /tags/{name}**:
+  * `name` (path): The logical tag name.
+  * `body` (JSON): The value object to write.
+
+## Returns
+
+* **GET**: Returns a `Tag` object as JSON.
+* **POST**: Returns a `UniconResponse<bool>` as JSON.
+  * Success: `200 OK`.
+  * Failure: `400 BadRequest`.
+
+## Examples
+
+### 1. Read a Tag using cURL
+
+```bash
+curl -X GET "https://localhost:5001/tags/Temperature"
+```
+
+### 2. Write a Tag using HttpClient (C#)
+
+```csharp
+var client = new HttpClient();
+var response = await client.PostAsJsonAsync("https://localhost:5001/tags/SetPoint", 25.5);
+
+if (response.IsSuccessStatusCode)
+{
+    var result = await response.Content.ReadFromJsonAsync<UniconResponse<bool>>();
+    Console.WriteLine($"Write Success: {result.Data}");
+}
+```
+
+---
+
+---
+url: /en/docs/xb4dudtf/index.md
+---
+# Web API & Integration
+
+## Overview
+
+`UniCon.WebServer` provides a comprehensive RESTful API layer based on ASP.NET Core Minimal APIs. It serves as a universal protocol conversion and configuration bridge between southbound industrial devices and northbound IT systems.
+
+## Core Responsibilities
+
+* **Driver Lifecycle Management**: Enables dynamic addition, query, and deletion of driver instances for various industrial protocols (S7, Modbus, OPC UA, MQTT, OPC UA PubSub) via APIs without requiring a service restart.
+* **Universal Data Read/Write**: Shields underlying protocol differences by providing strongly-typed read and write operations on any device tag address using a unified HTTP format.
+* **Subscription & Real-Time Caching**: Maintains southbound driver data subscriptions in memory and stores the latest timestamps and data quality in cache for high-speed polling by northbound clients.
+* **Object-Device Mapping (ODM)**: Automatically generates tag mapping tables using entity class attributes, and supports bulk reading from devices to auto-populate entities, as well as reflecting bulk writing of entity properties to devices.
+* **Task Scheduling Management**: Enables dynamic runtime creation, querying, updating, and deletion (CRUD) of scheduled tasks.
+
+***
+
+## API Overview
+
+### 1. Driver Lifecycle Management `/api/drivers`
+
+| Method | Route | Description |
+|------|------|-------------|
+| `GET` | `/api/drivers` | Get status list of all registered drivers |
+| `GET` | `/api/drivers/{id}` | Query details of a single driver |
+| `POST` | `/api/drivers` | Dynamically register and spin up a new driver (with Watchdog self-healing) |
+| `DELETE` | `/api/drivers/{id}` | Stop, unregister, and destroy the specified driver |
+
+### 2. Universal Data Read/Write and Subscription `/api/drivers/{id}`
+
+| Method | Route | Description |
+|------|------|-------------|
+| `GET` | `/api/drivers/{id}/read?address=&type=` | Strongly-typed real-time read of a single tag |
+| `POST` | `/api/drivers/{id}/write` | Strongly-typed real-time write of a single tag |
+| `POST` | `/api/drivers/{id}/subscribe` | Dynamically register tag subscription (cache the latest value) |
+| `POST` | `/api/drivers/{id}/unsubscribe` | Unsubscribe from the specified tag |
+| `GET` | `/api/drivers/{id}/subscriptions` | Get cached data for all subscribed tags of this driver |
+| `GET` | `/api/drivers/{id}/subscriptions/{*address}` | Get real-time cached value of a single subscription |
+
+### 3. Object-Device Mapping (ODM) `/api/odm`
+
+| Method | Route | Description |
+|------|------|-------------|
+| `GET` | `/api/odm/schema` | Scan entity classes using reflection to generate physical tag mapping schemas |
+| `GET` | `/api/odm/data` | Spin up drivers on demand and batch-read entities to automatically populate and return them |
+| `POST` | `/api/odm/data` | Receive entity JSON and reflectively batch-write properties to physical devices |
+
+### 4. Task Scheduling Management `/api/jobs`
+
+| Method | Route | Description |
+|------|------|-------------|
+| `GET` | `/api/jobs/executing-count` | Get the number of currently executing tasks |
+| `GET` | `/api/jobs` | Get a list of all scheduled tasks |
+| `GET` | `/api/jobs/{id}` | Query detailed information of a single task |
+| `POST` | `/api/jobs` | Dynamically create and schedule a new task |
+| `PUT` | `/api/jobs/{id}` | Update the Cron expression and parameters of a scheduled task |
+| `DELETE` | `/api/jobs/{id}` | Unregister and completely delete the specified task |
+
+***
+
+## Initialization & Configuration
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddUniCon();       // Inject driver registry, connection manager, cache, and ODM engine
+builder.Services.AddUniConJobs();   // Inject task scheduling system
+
+var app = builder.Build();
+
+// Automatically discover and register all drivers decorated with [UniconDriver]
+var driverRegistry = app.Services.GetRequiredService<IDriverRegistry>();
+driverRegistry.DiscoverAndRegisterDrivers();
+
+// Start the task scheduler
+var jobScheduler = app.Services.GetRequiredService<JobScheduler>();
+await jobScheduler.StartAsync();
+
+app.Run();
+```
+
+---
+
+---
+url: /en/docs/yjh9le2c/index.md
+---
+# Quick Start & Integration Guide
+
+This guide introduces how to reference the UniCon framework in a third-party project and quickly achieve industrial device communication and collection scheduling.
+
+## 1. Installation & Reference
+
+UniCon adopts a highly decoupled **pluggable and modular** architecture. The core framework and each physical communication driver are published in the NuGet repository as independent packages.
+
+::: tip 💡 Do I need to install all NuGet packages in sequence?
+**No.**
+You only need to, and must, install the core dependency package **`UniCon.Core`**. Then, based on your actual industrial scenarios, **selectively install only the specific protocol driver packages you need**. For example, if your project only requires collecting S7 PLC data and Modbus registers, you only need to install `UniCon.Core`, `UniCon.Drivers.S7`, and `UniCon.Drivers.Modbus`. This avoids importing unnecessary third-party external dependencies (such as OPC UA or MQTTnet libraries), keeping your business project minimal, clean, and highly efficient.
+:::
+
+### 📦 Core Scheduling Engine (Required)
+
+* **.NET CLI**:
+  ```bash
+  dotnet add package UniCon.Core
+  ```
+* **Package Manager Console**:
+  ```powershell
+  Install-Package UniCon.Core
+  ```
+
+### 🔌 Physical Communication Driver Packages (Select as Needed)
+
+| Driver Name | Description | .NET CLI Installation Command |
+| :--- | :--- | :--- |
+| **`UniCon.Drivers.S7`** | Siemens full-series PLC (S7-1200/1500/300) | `dotnet add package UniCon.Drivers.S7` |
+| **`UniCon.Drivers.OpcUa`** | High-performance OPC UA Client communication | `dotnet add package UniCon.Drivers.OpcUa` |
+| **`UniCon.Drivers.Modbus`** | Standard Modbus TCP physical devices | `dotnet add package UniCon.Drivers.Modbus` |
+| **`UniCon.Drivers.Mqtt`** | Lightweight MQTT message queue pub/sub | `dotnet add package UniCon.Drivers.Mqtt` |
+| **`UniCon.Drivers.OpcUaPubSub`** | OPC UA PubSub UDP/MQTT driver | `dotnet add package UniCon.Drivers.OpcUaPubSub` |
+
+***
+
+## 2. Integration into ASP.NET Core (Recommended Way)
+
+UniCon provides out-of-the-box extension methods to inject the registry, connection manager, cache, and job scheduler in one click.
+
+### Program.cs Registration Example
+
+```csharp
+using UniCon.Core;
+using UniCon.Core.Jobs;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Inject UniCon core services with one click
+// Includes: IDriverRegistry, IConnectionManager, INetworkMonitor,
+//           OdmEngine, IUniconCacheProvider(MemoryCacheProvider)
+builder.Services.AddUniCon();
+
+// Inject task scheduling system (with Quartz.NET and automatic built-in Job scanning)
+builder.Services.AddUniConJobs();
+
+var app = builder.Build();
+
+// Automatically discover and register all driver assemblies with the [UniconDriver] attribute
+var driverRegistry = app.Services.GetRequiredService<IDriverRegistry>();
+driverRegistry.DiscoverAndRegisterDrivers();
+
+// Start the job scheduler
+var jobScheduler = app.Services.GetRequiredService<JobScheduler>();
+await jobScheduler.StartAsync();
+
+app.Run();
+```
+
+***
+
+## 3. Basic Communication Example (Create Driver via DI Factory)
+
+In ASP.NET Core projects, it is recommended to use `IDriverRegistry` to create and manage drivers. All driver dependencies (`ILogger`, `IUniconCacheProvider`, `INetworkMonitor`) are automatically assembled by the DI container.
+
+```csharp
+using UniCon.Core;
+using UniCon.Core.Models;
+
+public class PlcService
+{
+    private readonly IDriverRegistry _driverRegistry;
+    private readonly IConnectionManager _connectionManager;
+
+    public PlcService(IDriverRegistry driverRegistry, IConnectionManager connectionManager)
+    {
+        _driverRegistry = driverRegistry;
+        _connectionManager = connectionManager;
+    }
+
+    public async Task InitializeAsync()
+    {
+        // Create S7 driver via alias (DI automatically assembles all dependencies)
+        var driver = _driverRegistry.CreateDriver("S7", "PLC_Line1");
+        _driverRegistry.Register(driver);
+
+        // Start the connection (Watchdog automatically reconnects with exponential backoff on initial failure)
+        await _connectionManager.RegisterDriverAsync(
+            driver,
+            "CpuType=S71200;Ip=192.168.0.10;Rack=0;Slot=1"
+        );
+
+        // Single-point read
+        var request = new UniconRequest { Address = "DB1.DBD0" };
+        var response = await driver.ReadAsync<float>(request);
+        if (response.Success)
+        {
+            Console.WriteLine($"Temperature: {response.Data?.Value} °C");
+            Console.WriteLine($"Data Quality: {response.Data?.Quality}");
+            Console.WriteLine($"PLC Timestamp: {response.Data?.SourceTimestamp}");
+        }
+    }
+}
+```
+
+***
+
+## 4. Active Collection Subscription Engine
+
+For protocols like S7 and Modbus that do not support active push, UniCon v2 provides a complete active polling subscription engine.
+
+```csharp
+// Structured subscription (Recommended, features deadband filtering and metadata)
+var subId = await driver.SubscribeAsync(new UniconSubscription
+{
+    Address    = "DB1.DBD0",
+    ScanRateMs = 500,                         // Poll every 500ms
+    ScanMode   = UniconScanMode.ExceptionBased, // Callback only on value or quality change
+    Metadata   = new TagMetadata
+    {
+        Name     = "Reactor Temperature",
+        Unit     = "℃",
+        Deadband = 0.5   // Changes < 0.5℃ will not trigger notification
+    },
+    Callback = async dataValue =>
+    {
+        Console.WriteLine($"[{dataValue.ServerTimestamp:HH:mm:ss.fff}] Temp: {dataValue.Value} ℃");
+        await Task.CompletedTask;
+    }
+});
+
+// Unsubscribe precisely by ID
+await driver.UnsubscribeByIdAsync(subId);
+```
+
+***
+
+## 5. Batch Operations
+
+### Batch Read (S7 automatically merges contiguous addresses, max 19 items/time)
+
+```csharp
+var requests = new List<UniconRequest>
+{
+    new() { Address = "DB1.DBD0" },
+    new() { Address = "DB1.DBD4" },
+    new() { Address = "DB1.DBX8.0" }
+};
+
+var results = await driver.ReadBatchAsync(requests);
+foreach (var res in results)
+{
+    if (res.Success)
+        Console.WriteLine($"Value: {res.Data?.Value}, Quality: {res.Data?.Quality}");
+}
+```
+
+### Get Scan Statistics
+
+```csharp
+var stats = driver.GetStatistics(500, UniconScanMode.ExceptionBased);
+if (stats != null)
+{
+    Console.WriteLine($"Scan Count: {stats.ScanCount}");
+    Console.WriteLine($"Notification Count: {stats.NotifyCount}");
+    Console.WriteLine($"Average Read Duration: {stats.AverageReadDurationMs:F1}ms");
+    Console.WriteLine($"Error Rate: {stats.ErrorRate:P2}");
+}
+```
+
+***
+
+## 6. Common Protocol Connection String Reference
+
+| Protocol | Connection String Example |
+| :--- | :--- |
+| **S7** | `CpuType=S71200;Ip=192.168.0.10;Rack=0;Slot=1` |
+| **S7 (with timeout)** | `CpuType=S71500;Ip=192.168.0.10;Rack=0;Slot=1;ReadTimeout=3000;WriteTimeout=3000` |
+| **Modbus** | `ip=192.168.0.50;port=502;unitid=1;timeout=2000` |
+| **OPC UA (Anonymous)** | `opc.tcp://192.168.0.100:4840` |
+| **OPC UA (User & Pwd)** | `EndpointURL=opc.tcp://192.168.0.100:4840;Username=admin;Password=secret` |
+| **MQTT** | `server=broker.hivemq.com;port=1883;clientid=UniCon_01` |
+| **MQTT (TLS)** | `server=broker.example.com;port=8883;username=user;password=pwd;usetls=true` |
+| **OPC UA PubSub (UDP)** | `opc.udp://224.0.2.14:4840` |
+| **OPC UA PubSub (MQTT)** | `mqtt://192.168.0.200:1883/opcua/pubsub` |
+
+***
+
+## 7. Driver State Listening
+
+```csharp
+driver.StateChanged += (_, e) =>
+{
+    Console.WriteLine($"[{e.DriverId}] State Changed: {e.OldState} → {e.NewState}");
+};
+```
+
+***
+
+## 8. Use Connection Extension Methods
+
+`ConnectionStringBuilder` provides fluent strongly-typed APIs to build connection strings:
+
+```csharp
+using UniCon.Core.Helpers;
+
+// Method 1: Build connection string fluently
+string connStr = ConnectionStringBuilder.S7()
+    .WithCpuType(S7CpuType.S71500)
+    .WithIp("192.168.1.10")
+    .WithRack(0)
+    .WithSlot(1)
+    .Build();
+// Output: CpuType=S71500;Ip=192.168.1.10;Rack=0;Slot=1
+
+// Method 2: Use direct connection extension method (Recommended)
+var driver = _driverRegistry.CreateDriver("S7", "PLC_01");
+bool isConnected = await driver.ConnectS7Async("192.168.1.10", S7CpuType.S71500);
+```

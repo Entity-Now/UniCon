@@ -1,0 +1,125 @@
+---
+url: /docs/muvzzdpy/index.md
+---
+# Siemens S7 驱动 (Siemens S7 Driver)
+
+## 概述 (Overview)
+
+西门子 S7 驱动实现了基于以太网（ISO-on-TCP）对西门子全系列 PLC（S7-200 Smart、S7-300、S7-400、S7-1200、S7-1500）的直连通讯。底层基于 `S7.Net` 构建，支持 DB 块、M 区、I/Q 区等多种寄存器类型读写与批量合并操作。
+
+> **注意**：S7 PDU 限制最大 240 字节，`ReadBatchAsync` 每批次安全上限为 19 个数据项（`S7Driver` 已内置自动分批逻辑）。
+
+## 使用方法 (Usage)
+
+在 ASP.NET Core 项目中，推荐通过 `IDriverRegistry` 工厂方法创建（DI 自动装配全部依赖）：
+
+```csharp
+// 通过别名工厂创建（推荐，DI 自动装配 ILogger, IUniconCacheProvider, INetworkMonitor）
+var driver = _driverRegistry.CreateDriver("S7", "PLC_Line1");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(driver, "CpuType=S71200;Ip=192.168.0.10;Rack=0;Slot=1");
+```
+
+## 参数说明 (Parameters)
+
+### 连接字符串参数
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| CpuType | `string` | PLC CPU 类型：`S7200`、`S7300`、`S7400`、`S71200`、`S71500` | 是 | 无 |
+| Ip | `string` | PLC 的 IP 地址 | 是 | 无 |
+| Rack | `short` | PLC 的机架号 (Rack) | 否 | `0` |
+| Slot | `short` | PLC 的插槽号 (Slot) | 否 | `1` |
+| ReadTimeout | `int` | 读取超时时间（毫秒） | 否 | `3000` |
+| WriteTimeout | `int` | 写入超时时间（毫秒） | 否 | `3000` |
+
+### 地址格式 (Address)
+
+| 格式 | 示例 | 说明 |
+|------|------|------|
+| DB 块浮点 | `DB1.DBD0` | DB1 第 0 字节开始的双字（32 位浮点） |
+| DB 块整数 | `DB1.DBW4` | DB1 第 4 字节的字（16 位整数） |
+| DB 块位 | `DB1.DBX8.0` | DB1 第 8 字节第 0 位（布尔） |
+| M 区字节 | `MB0` | M 区第 0 字节 |
+| M 区位 | `M0.0` | M 区第 0 字节第 0 位 |
+| 输入 | `I0.0` | 数字输入第 0 位 |
+| 输出 | `Q0.0` | 数字输出第 0 位 |
+
+### 读写方法参数
+
+| 参数名 | 类型 | 说明 | 是否必填 |
+|--------|------|------|----------|
+| Address | `string` | S7 寄存器绝对地址 | 是 |
+| value | `T` | 写入的具体值（仅 `WriteAsync` 需要） | 是 |
+
+## 返回值 (Returns)
+
+| 方法 | 返回类型 | 说明 |
+|------|----------|------|
+| `ReadAsync<T>` | `UniconResponse<T>` | `response.Success` 为 true 时，`response.Data.Value` 携带值，`response.Data.Quality` 携带质量码 |
+| `WriteAsync<T>` | `UniconResponse<bool>` | `true` 成功，`false` 包含错误信息 |
+| `ReadBatchAsync` | `IEnumerable<UniconResponse<object>>` | 每批最多 19 个地址，自动按 PDU 限制分批 |
+| `SubscribeAsync` | `Task<string>` | 返回订阅分配的 GUID 标识 |
+
+## 使用示例 (Examples)
+
+**示例 1：读取 S7-1200 实数**
+
+```csharp
+// 通过 DI 工厂创建驱动
+var driver = _driverRegistry.CreateDriver("S7", "Line1_PLC");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(driver, "CpuType=S71200;Ip=192.168.0.10;Rack=0;Slot=1");
+
+var req = new UniconRequest { Address = "DB1.DBD0" };
+var res = await driver.ReadAsync<float>(req);
+
+if (res.Success && res.Data != null)
+{
+    Console.WriteLine($"温度值: {res.Data.Value} °C, 质量: {res.Data.Quality}");
+    Console.WriteLine($"PLC 时间: {res.Data.SourceTimestamp}, 网关时间: {res.Data.ServerTimestamp}");
+}
+```
+
+**示例 2：批量读取（自动合并连续地址）**
+
+```csharp
+var requests = new List<UniconRequest>
+{
+    new() { Address = "DB1.DBD0" },   // 温度
+    new() { Address = "DB1.DBD4" },   // 压力
+    new() { Address = "DB1.DBX8.0" }, // 运行状态位
+    new() { Address = "DB1.DBW10" }   // 产品计数
+};
+
+var results = await driver.ReadBatchAsync(requests);
+foreach (var r in results)
+{
+    Console.WriteLine(r.Success ? $"值: {r.Data?.Value}" : $"错误: {r.Message}");
+}
+```
+
+**示例 3：后台订阅（v2 ExceptionBased 模式，含死区）**
+
+```csharp
+await driver.SubscribeAsync(new UniconSubscription
+{
+    Address    = "DB1.DBD0",
+    ScanRateMs = 500,
+    ScanMode   = UniconScanMode.ExceptionBased,
+    Metadata   = new TagMetadata { Unit = "℃", Deadband = 0.5 },
+    Callback   = async dv =>
+    {
+        Console.WriteLine($"[{dv.ServerTimestamp:HH:mm:ss.fff}] 温度变化: {dv.Value} ℃");
+        await Task.CompletedTask;
+    }
+});
+```
+
+**示例 4：写入 PLC 地址**
+
+```csharp
+var writeReq = new UniconRequest { Address = "DB1.DBX8.0" };
+var writeRes = await driver.WriteAsync<bool>(writeReq, true);
+Console.WriteLine(writeRes.Success ? "启动指令下发成功" : $"写入失败: {writeRes.Message}");
+```

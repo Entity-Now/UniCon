@@ -1,0 +1,50 @@
+---
+url: /versions/qlt9touk/index.md
+---
+# UniCon 版本更新记录
+
+## \[v1.9.0] - 2026-05-17
+
+### 变更类型
+
+* **Feature (新功能)**: 统一主动轮询订阅引擎 (Active Polling Subscription)、自适应值变化检测 (Change Detection) 与可插拔分布式缓存提供者 (IUniconCacheProvider)。
+* **Feature (新功能)**: 支持基于 Key-Value 模式的 OPC UA 复杂安全连接配置（匿名登录、账户密码、X.509 证书及安全加密策略）。
+
+### 更新内容
+
+* **主动轮询订阅机制 (Active Polling Engine)**:
+  * 针对 S7、Modbus 等南向无发布订阅机制的底层工控协议，在 `DriverBase` 层统一实现后台主动轮询订阅引擎。
+  * 通过 Task 独立微线程安全地并发执行，支持独立的 Scan Rate，不阻塞主线程。
+* **扫描推送双模式 (UniconScanMode)**:
+  * **Exception-Based (变更推送)**: 默认且最优模式。周期轮询物理寄存器，但仅在实际数值或质量戳发生改变时才更新缓存、触发通知。
+  * **Polled (周期刷屏)**: 满足必须周期下发的特殊场景，不论数值是否变化均每周期强制触发通知。
+* **可插拔分布式缓存机制 (IUniconCacheProvider)**:
+  * 定义了统一的 `IUniconCacheProvider` 分布式/本地缓存接口，彻底解耦工控网关缓存介质。
+  * 提供了内置的 `MemoryCacheProvider` 做为默认高并发进程内缓存。
+  * 提供了对 `RedisCacheProviderPlaceholder` 的完美架构兼容与 fallback 平滑回退机制，支持零缝隙替换为 Redis。
+* **生命周期安全防护 (GC Safeguard)**:
+  * 在 `DriverBase` 中设计了完备的垃圾回收析构函数心跳清理 (`~DriverBase`) 与主动平滑卸载功能，彻底杜绝背景 Polling Tasks 内存/线程泄漏。
+* **服务网关深度集成**:
+  * `CommunicationService` 构造函数中全面注入 `IUniconCacheProvider` 并桥接静态 `DriverBase.CacheProvider`，确保新实例化驱动 100% 自动继承缓存介质。
+  * 重构 `CommunicationService` 的 HTTP 数据查询接口为 `Task`-based 异步操作，解耦数据存储通道。
+* **OPC UA 复杂物理连接加密集成 (Scenario 2 & Security)**:
+  * 在 `OpcUaDriver` 中实现自适应 `OpcUaConnectionOptions` 解析器，支持常规 Endpoint URL 格式（兼容老版本）与分号分隔的 Key-Value 参数连接字符串格式。
+  * 引入了 BouncyCastle 的 `X509CertificateParser` 与 `PemReader`，支持无缝加载 DER 证书与 PEM 密钥文件，满足高安全级别的 X.509 客户端证书证书链握手安全策略。
+  * 动态集成匿名（`Anonymous`）、账户密码（`UserNameIdentity`）及安全配置策略（`Basic256Sha256`组件、`Basic128Rsa15`、`None` 等）。
+* **南向多协议驱动通讯参数全方位升级与自愈保障 (Feature/Config)**:
+  * 针对 `S7Driver`、`ModbusDriver`、`MqttDriver` 全方位补全了缺失的生产级通讯参数，摆脱硬编码并赋予用户完全的连接掌控力：
+    * `S7Driver`: 支持解析并直接配置底层 `Plc` 的 `Timeout` / `ReadTimeout` / `WriteTimeout` 通讯套接字超时。
+    * `ModbusDriver`: 支持配置 `unitid` / `slaveid` (从站标识符) 以及 `timeout` / `connectiontimeout` (连接超时)。
+    * `MqttDriver`: 完美融合最新 MQTTnet 5.x 体系，全面支持 `server`/`host`, `port`, `clientid`, `username`/`user`, `password`/`pwd`, `cleansession`, `keepalive` 以及 SSL/TLS 安全连接的 `.WithTlsOptions` 配置。
+  * **文档规范对齐**: 同步重写并补齐了 `/docs/3. drivers/` 下对应 S7、Modbus、MQTT 驱动的参数表与用法示例，保障项目架构文档 100% 完整与一致。
+* **高并发主动订阅调度引擎升级 (Architecture & Concurrency)**:
+  * **结构化订阅模型与生命周期管控 (`UniconSubscription`)**:
+    * 设计并实现结构化订阅模型，支持每个订阅项携带唯一 `Id`、特定的 `ScanRateMs` (扫描频率)、`ScanMode` (推/拉模式) 与各自的 `Callback`，摆脱了原先仅能单一地址监控且无法独立卸载的缺陷。
+    * 在 `IUniconDriver` 和 `DriverBase` 中追加了基于订阅 ID 取消注册的 `UnsubscribeByIdAsync`，以及查询当前活动监控项的 `GetSubscriptions()`。
+  * **集中化轮询调度器 (Central Polling Coordinator)**:
+    * 针对成百上千点位高并发订阅场景下的 CPU 线程切换与 PLC 总线风暴问题，彻底弃用“一地址一微线程 (Task)”的低效方案。
+    * 引入了单驱动共享的主调度器 `RunSchedulerLoopAsync`，通过高精度 Tick 轮询识别出期满 (Due) 的订阅列表，自动对同一地址的订阅进行去重与聚合。
+    * 调用统一的 `ReadBatchAsync` 执行批量读取，实现单次查询物理总线后批量分发回调，将上下文切换和网络开销降低数个数量级。
+    * 调度器的生命周期完全与物理驱动的连接状态 (Connect / Disconnect) 绑定，不产生任何后台悬挂或资源泄漏。
+  * **测试覆盖升级**:
+    * 新增 [SubscriptionSchedulerTests.cs](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/tests/UniCon.Tests/SubscriptionSchedulerTests.cs)，深度覆盖了集中化调度器批量请求分组、变更异常检测通知、以及多路订阅注销的正确性，保障系统自愈和通讯内核品质。

@@ -1,0 +1,125 @@
+---
+url: /versions/rym0gon5/index.md
+---
+# v2.0.0 — DriverBase 深度重构：扫描调度架构全面升级
+
+**日期**：2026-05-18
+**类型**：Refactor / Architecture
+
+***
+
+## 变更概述
+
+对 `DriverBase` 进行全面拆分与重构，从"职责过重的单体基类"演进为"轻量协调层 + 独立基础设施组件"架构。
+
+***
+
+## 新增文件
+
+| 文件 | 职责 |
+|------|------|
+| `Scanning/IScanStrategy.cs` | 扫描策略接口，替代 `if(ScanMode == ...)` 分支 |
+| `Scanning/PolledScanStrategy.cs` | 周期全量通知策略 |
+| `Scanning/ExceptionBasedScanStrategy.cs` | 变化通知策略，支持死区过滤 |
+| `Scanning/TagEntry.cs` | 单地址采集单元，持有缓存值与多回调 |
+| `Scanning/ScanGroup.cs` | 以 ScanRate 为粒度的扫描组，持有 LastPolledTime |
+| `Scanning/ScanGroupRegistry.cs` | ScanGroup 注册表，注册时完成地址去重 |
+| `Scanning/ScanScheduler.cs` | 基于最小等待时间调度，替代 while(true)+Delay(50) |
+| `Notification/NotificationEnvelope.cs` | 通知载体 record |
+| `Notification/NotificationDispatcher.cs` | Channel\&lt;T\&gt; 异步分发器，独立线程消费，Callback 异常隔离 |
+| `Transport/ITransport.cs` | 传输层抽象，支持并发读/独占写 |
+| `Models/QualityCode.cs` | OPC UA 兼容质量码枚举 |
+| `Models/TagMetadata.cs` | Tag 元数据（类型/权限/单位/缩放/死区） |
+| `Models/ScanStatistics.cs` | Interlocked 无锁运行统计 |
+
+***
+
+## 核心变更点（与 v1.9.0 的差异）
+
+### DriverBase
+
+* 构造函数增加 `IUniconCacheProvider cacheProvider`（DI 注入，移除 `static CacheProvider`）
+* `State` setter 改为 `protected`，通过 `Interlocked.Exchange` 保证原子性，并触发 `StateChanged` 事件
+* 移除全局 `_syncLock`（锁下沉到 Transport 层，读写分离）
+* 移除 `~DriverBase()` Finalizer，改用标准 `virtual void Dispose(bool)` 模式
+* `StopScheduler` 改为完全异步 `StopSchedulerAsync()`，消除 `.Wait(500)` 阻塞
+* 订阅注册时直接分组到 `ScanGroupRegistry`，零运行时 LINQ
+
+### UniconSubscription
+
+* Callback 从 Action\&lt;DataValue\&lt;object\&gt;\&gt; 改为 Func\&lt;DataValue\&lt;object\&gt;, Task\&gt;
+* 新增 `MaxQueueLength`、`OverflowPolicy`、`TagMetadata` 字段
+* 移除 `LastPolledTime`（迁移至 `ScanGroup`）
+
+### DataValue\&lt;T\&gt;
+
+* 新增 `ServerTimestamp`（网关到达时间戳）
+* 新增 `QualityCode Quality`（OPC UA 兼容质量码）
+
+### IUniconDriver
+
+* SubscribeAsync callback 升级为 Func\&lt;DataValue\&lt;object\&gt;, Task\&gt;
+* 新增 `StateChanged` 事件
+* 新增 `GetStatistics(scanRateMs, scanMode)` 接口
+
+### 所有 Driver 子类
+
+* 构造函数统一增加 `IUniconCacheProvider cacheProvider`
+* `Dispose()` 改为 `override`，调用 `base.Dispose()`
+* `MqttDriver` / `OpcUaPubSubDriver` 订阅回调更新为异步 Func
+* `S7Driver` 重写了 `ReadBatchAsync` 与 `WriteBatchAsync`，采用 S7.Net 原生批量 API，支持 PDU 自动切片并具备单点失败退避到单个读写的能力
+
+### CommunicationService
+
+* 移除 `DriverBase.CacheProvider = cacheProvider`（静态绑定废除）
+* 驱动工厂统一传入 `_cacheProvider`
+* `SubscribeAsync` 回调改为 `async dataValue => await _cacheProvider.SetAsync(...)`
+
+***
+
+## 关键架构改进对照
+
+| 旧行为 | 新行为 |
+|--------|--------|
+| `while(true) + Delay(50)` 全量扫描 | 最小等待时间调度，仅调度到期 ScanGroup |
+| 运行时 `GroupBy(address)` | 注册时 `ScanGroupRegistry` 预分组 |
+| `sub.Callback(value)` 同步调用 | Channel\&lt;T\&gt; 投递，独立线程异步消费 |
+| `CacheCompare` 在 Subscription 层 | `CacheCompare` 在 `TagEntry` 层 |
+| `static CacheProvider` | 构造函数 DI 注入 |
+| `_syncLock` 全局粗粒度锁 | 锁下沉至 Transport（`ITransport` 抽象） |
+| `Task.Wait(500)` 停止调度器 | `await _scheduler.DisposeAsync()` 全异步 |
+| `~DriverBase()` Finalizer | `virtual Dispose(bool)` 标准模式 |
+| `ScanMode if/else` | `IScanStrategy` 策略模式 |
+
+## \[v2.0.1] - 2026-05-18
+
+### Added / Changed / Fixed
+
+* \[Added] `S7Driver` 原生批量读取 (`ReadBatchAsync`) 与批量写入 (`WriteBatchAsync`) 支持。
+
+### Key Changes
+
+* 使用 `S7.Net` 原生的 `ReadMultipleVarsAsync` 和 `WriteAsync(DataItem[])` 提高批量通信效率。
+* 设计了基于 19 (读) / 10 (写) 大小的 PDU 安全切片分组，防止超出西门子协议 PDU 大小限制。
+* 引入健全的容灾退避机制：若整体批量写入/读取因地址解析或 PLC 内部错误失败，自动无缝降级退避至单个读写模式，保证其他正常变量通信不受单点错误影响。
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: S7Driver 批量读写原生实现
+
+### 🎯 最终目标
+
+* 在 `S7Driver` 中重写 `ReadBatchAsync` 和 `WriteBatchAsync`，使用 S7.Net 原生的批量操作 API，提升读写效率，不再依赖 `DriverBase` 默认的暴力循环。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] src/UniCon.Drivers.S7/S7Driver.cs（重写批量读写方法）
+
+### 📝 Steps
+
+* \[x] Step 1: 在 `S7Driver` 中重写 `ReadBatchAsync` 方法，支持将多个请求转换为批量读操作并调用。
+* \[x] Step 2: 在 `S7Driver` 中重写 `WriteBatchAsync` 方法，支持将多个写入请求转换为批量写操作并调用。
+
+\------details end------

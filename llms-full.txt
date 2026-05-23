@@ -1,0 +1,4510 @@
+---
+url: /docs/index.md
+---
+# UniCon 项目简介
+
+## 概述
+
+UniCon（Universal Connection）是一款高性能、插件化的 .NET 工业物联网通讯集成框架，专为工业边缘网关、SCADA 平台及数字孪生系统设计，运行于 .NET 10+。
+
+框架通过统一的南向驱动接口屏蔽各协议差异，提供完整的生命周期管理、自愈重连机制、主动采集订阅引擎及 REST API 北向接入，帮助开发者以极低的集成成本接入多种工业协议设备。
+
+## 核心价值
+
+* **协议抽象化**：通过统一的 `IUniconDriver` 接口、`UniconRequest` / `UniconResponse<T>` 请求响应模型，屏蔽 S7、Modbus、OPC UA、MQTT、OPC UA PubSub 等不同协议之间的差异。
+* **连接自愈**：`DriverBase` 内置 Watchdog 自愈线程，支持网络中断感知（`INetworkMonitor`）与指数退避重连，断网挂起、上线即愈。
+* **高性能扫描调度**：基于最小等待时间调度的 `ScanScheduler`，`Channel<T>` 异步解耦采集线程与回调线程，`IScanStrategy` 策略模式支持 `ExceptionBased`（死区过滤）与 `Polled` 两种模式。
+* **对象-设备映射（ODM）**：类 ORM 设计，通过 `[UniconDevice]` 与 `[UniconAddress]` 特性将业务实体属性自动绑定到设备寄存器，免硬编码自动读写。
+* **任务调度系统**：基于 Quartz.NET 深度封装，提供 `HttpJob`、`CommunicationJob` 等内置定时任务，支持运行时 CRUD 动态管理。
+* **REST API 北向接入**：基于 ASP.NET Core Minimal API，提供驱动管理、数据读写、订阅控制、ODM 映射及任务调度全套接口。
+* **可插拔缓存**：内置 `MemoryCacheProvider`（基于 `ConcurrentDictionary`），可无缝替换为 Redis 等分布式实现。
+
+## 项目架构
+
+```
+UniCon
+├── UniCon.Core              # 核心契约、调度引擎、ODM、缓存、任务
+├── UniCon.Drivers.S7        # 西门子 S7 驱动（S7.Net）
+├── UniCon.Drivers.Modbus    # Modbus TCP 驱动（EasyModbus）
+├── UniCon.Drivers.OpcUa     # OPC UA 客户端驱动（Workstation.UaClient）
+├── UniCon.Drivers.Mqtt      # MQTT 发布订阅驱动（MQTTnet）
+├── UniCon.Drivers.OpcUaPubSub  # OPC UA PubSub UDP/MQTT 无连接驱动
+└── UniCon.WebServer         # Minimal API 宿主（驱动管理、ODM、任务 API）
+```
+
+## 支持的工业协议
+
+| 驱动 | 协议 / 标准 | 底层库 | 驱动别名 |
+|------|------------|--------|---------|
+| `S7Driver` | 西门子 S7（ISO-on-TCP）S7-200/300/1200/1500 | S7.Net | `"S7"` |
+| `ModbusDriver` | Modbus TCP（线圈/保持/输入/离散寄存器） | EasyModbus | `"Modbus"` |
+| `OpcUaDriver` | OPC UA Client/Server（匿名/账户/证书） | Workstation.UaClient | `"OpcUa"` |
+| `MqttDriver` | MQTT 3.1/5.0 Pub/Sub（TLS 可选） | MQTTnet | `"Mqtt"` |
+| `OpcUaPubSubDriver` | OPC UA PubSub UDP 组播 / MQTT（UADP/JSON） | 自研 | `"OpcUaPubSub"` |
+
+## 目标人群
+
+适用于需要集成多种工业设备（PLC、OPC UA Server、Modbus 仪表、MQTT Broker 等）进行数据采集、中转、分析或展示的开发者，尤其适合工业边缘网关、数字孪生平台与 IoT 集成系统场景。
+
+---
+
+---
+url: /docs/0efv5vxf/index.md
+---
+# 核心架构 (Core Architecture)
+
+## 概述
+
+Core 模块是 UniCon 的心脏，定义了系统的全部契约、模型结构、基础自愈服务、统一缓存与 IOC 注册入口。
+
+## 关键功能
+
+* **接口定义 (`IUniconDriver`)**: 统一南向驱动契约，涵盖即时读写、批量读写、探活、异步订阅、状态变更事件与运行统计查询。
+* **消息模型**: UniconRequest / UniconResponse\<T> 实现结构化交互；DataValue\<T> 携带 `SourceTimestamp`（PLC 时间）、`ServerTimestamp`（网关到达时间）、`DataStatus` 与 `QualityCode`（OPC UA 兼容质量码）。
+* **驱动注册中心 (`IDriverRegistry`)**: 全系统内驱动实例的统一共享、动态查询与状态轮询。
+* **连接自愈管理器 (`IConnectionManager`)**: 全生命周期托管所有驱动的物理连接，与驱动内置 Watchdog 指数退避重连机制联动。
+* **对象-设备映射引擎 (`OdmEngine`)**: 类 ORM 设计，通过强类型特性将业务实体属性自动映射到设备寄存器地址，免硬编码动态读写。
+* **扫描调度引擎 (v2)**:
+  * `ScanGroupRegistry`: 订阅注册时按 `(ScanRate, ScanMode)` 预分组，完成地址去重。
+  * `ScanScheduler`: 基于最小等待时间动态调度到期 `ScanGroup`，替代 `while(true)+Delay(50)` 全量扫描。
+  * `NotificationDispatcher`: `Channel<T>` 异步分发，独立线程消费，Callback 异常隔离不影响扫描线程。
+  * `IScanStrategy`: 策略模式替代 `if(ScanMode==...)` 分支，内置 `ExceptionBased`（死区支持）与 `Polled` 两种实现。
+* **Tag 元数据 (`TagMetadata`)**: 描述 Tag 的数据类型、读写权限、工程单位、线性缩放与死区阈值。
+* **运行统计 (`ScanStatistics`)**: 以 `Interlocked` 无锁方式采集每个 `ScanGroup` 的扫描次数、通知次数、平均读取耗时与错误率。
+* **传输层抽象 (`ITransport`)**: 将字节收发与协议解析分离，支持并发读/独占写，锁粒度下沉至 Transport 层。
+* **可插拔缓存 (`IUniconCacheProvider`)**: DI 注入（非 static），内置 `MemoryCacheProvider`，可替换为 Redis 等分布式实现。
+* **开箱即用集成 (`ServiceCollectionExtensions`)**: 一键式 `AddUniCon()` 扩展，以单例模式将注册中心、连接管理器、缓存等接入 IOC 容器。
+* **连接构建器 (`ConnectionStringBuilder`)**: 强类型、流式 API 动态组装各协议连接字符串。
+
+---
+
+---
+url: /docs/0iiw0cmj/index.md
+---
+# 连接字符串构建器 (ConnectionStringBuilder)
+
+## 概述 (Overview)
+
+`ConnectionStringBuilder` 是 UniCon 核心层（Core）提供的实用工具类，旨在为用户提供强类型、流式（Fluent）的链式接口来动态组建各种工业协议（S7、Modbus、MQTT、OPC UA、PubSub）的连接字符串，彻底避免手动拼接字符串导致的语法拼写错误，大幅提升开发效率与使用体验。
+
+同时，框架还为 `IUniconDriver` 提供了快捷连接扩展方法（如 `ConnectS7Async`），可直接在驱动实例上调用，无需手动拼接连接字符串。
+
+## 使用方法 (Usage)
+
+通过 `ConnectionStringBuilder` 的静态入口创建对应协议的 Builder 实例，链式设置属性后调用 `Build()` 生成连接字符串；或直接在驱动实例上使用快捷的扩展连接方法。
+
+## 参数说明 (Parameters)
+
+### S7Builder 属性与参数
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| cpuType | `S7CpuType` | PLC CPU 类型枚举（支持 `S7200`, `S7300`, `S7400`, `S71200`, `S71500`） | 是 | `S7CpuType.S71200` |
+| ip | `string` | PLC 的 IP 地址 | 是 | `127.0.0.1` |
+| rack | `short` | 机架号 | 否 | `0` |
+| slot | `short` | 插槽号 | 否 | `1` |
+
+### ModbusBuilder 属性与参数
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| ip | `string` | Modbus 从站或网关的 IP 地址 | 是 | `127.0.0.1` |
+| port | `int` | Modbus 服务端口 | 否 | `502` |
+
+### OpcUaPubSubBuilder 属性与参数
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| scheme | `PubSubScheme` | 传输协议模式（支持 `Udp`, `Mqtt`） | 是 | `PubSubScheme.Udp` |
+| host | `string` | 组播 IP 地址或 Broker IP | 是 | `224.0.2.14` |
+| port | `int` | 端口号 | 是 | `4840` |
+| topic | `string` | MQTT 订阅的 Topic 路径（仅 MQTT 模式有效） | 否 | `""` |
+
+## 返回值 (Returns)
+
+### Build() 方法返回值
+
+| 类型 | 说明 |
+|------|------|
+| `string` | 拼接完整、格式正确的底层驱动所需物理连接字符串 |
+
+### 扩展连接方法（如 ConnectS7Async）返回值
+
+| 类型 | 说明 |
+|------|------|
+| `Task<bool>` | 驱动初始连接动作的异步布尔值（是否连接成功） |
+
+## 使用示例 (Examples)
+
+**示例 1：使用强类型流式构建 S7 连接串**
+
+```csharp
+using UniCon.Core.Helpers;
+
+string connStr = ConnectionStringBuilder.S7()
+    .WithCpuType(S7CpuType.S71500)
+    .WithIp("192.168.1.10")
+    .WithRack(0)
+    .WithSlot(1)
+    .Build();
+// 输出: CpuType=S71500;Ip=192.168.1.10;Rack=0;Slot=1
+```
+
+**示例 2：直接使用快捷连接扩展方法（推荐）**
+
+在已使用 `IDriverRegistry` 的项目中，驱动由工厂创建（DI 自动装配依赖）：
+
+```csharp
+using UniCon.Core;
+using UniCon.Core.Helpers;
+
+// 通过 DI 工厂创建驱动（自动装配所有依赖）
+var driver = _driverRegistry.CreateDriver("S7", "Line1_PLC");
+_driverRegistry.Register(driver);
+
+// 强类型、参数自解释的快捷连接扩展方法
+bool isConnected = await driver.ConnectS7Async("192.168.1.10", S7CpuType.S71500);
+```
+
+**示例 3：Modbus 连接串构建**
+
+```csharp
+string connStr = ConnectionStringBuilder.Modbus()
+    .WithIp("192.168.0.50")
+    .WithPort(502)
+    .Build();
+// 输出: ip=192.168.0.50;port=502
+```
+
+**示例 4：OPC UA PubSub UDP 组播连接串构建**
+
+```csharp
+string connStr = ConnectionStringBuilder.OpcUaPubSub()
+    .WithScheme(PubSubScheme.Udp)
+    .WithHost("224.0.2.14")
+    .WithPort(4840)
+    .Build();
+// 输出: opc.udp://224.0.2.14:4840
+```
+
+---
+
+---
+url: /docs/16mq4fzn/index.md
+---
+# 任务调度系统 (Job System)
+
+## 概述
+
+UniCon 任务调度系统是一个专为工业级边缘网关和高并发通讯设计的任务调度框架，完全基于 Quartz.NET 进行二次深度集成与封装。该系统完美支持 C# 10+ 异步编程模型，并为各种边缘设备数据定时上传、第三方 API 定时交互、后台通讯链路定时维护提供了开箱即用的基础设施支持。
+
+## 模块职责与目标
+
+* **物理点位与任务解耦**：允许用户通过任务编排以特定的时间频率自动定时读取或写入物理通道数据。
+* **丰富的内置任务库**：提供 HTTP 请求、系统自愈清理、南向驱动实时读写等多场景任务模板。
+* **动态生命周期控制 (CRUD)**：支持在运行时动态地对任务进行添加、修改、暂停、恢复和删除，且提供精准的活动任务执行数量计数。
+* **零摩擦 IoC 集成**：提供一键注入扩展，自动扫描并注册所有 Job 实现，实现真正的极简接入。
+
+## 包含的主要功能与文件
+
+| 文件 / 功能组件 | 职责描述 |
+|-----------------|----------|
+| [1.intro.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/docs/4.%20jobs/1.intro.md) | 本文档，说明任务调度系统的职责、架构和包含的功能。 |
+| [2.http-job.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/docs/4.%20jobs/2.http-job.md) | 定时进行外部 RESTful API 联动的高可靠 HTTP 通讯任务。 |
+| [3.communication-job.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/docs/4.%20jobs/3.communication-job.md) | 定时对 UniCon 南向设备点位进行周期读写交互的任务。 |
+| [4.job-scheduler.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/docs/4.%20jobs/4.job-scheduler.md) | 核心任务管理器 API 接口文档，包含 CRUD、状态统计及一键 DI 注入的使用指南。 |
+
+## IoC 注入及初始化
+
+系统提供了面向 `IServiceCollection` 的极其优雅的一键注入扩展方法 `AddUniConJobs()`：
+
+```csharp
+// 向 DI 容器注入调度系统，自动扫描并加载所有 IJob 任务
+builder.Services.AddUniConJobs();
+
+var app = builder.Build();
+
+// 启动任务调度器
+var scheduler = app.Services.GetRequiredService<JobScheduler>();
+await scheduler.StartAsync();
+```
+
+---
+
+---
+url: /docs/3pjzvnmd/index.md
+---
+# OPC UA PubSub 驱动集成与架构设计分析 (OPC UA PubSub Integration & Architecture Analysis)
+
+## 概述 (Overview)
+
+随着西门子官方的 `opc-ua-pubsub-dotnet` 开源库（Binary/Client/Broker）集成到 UniCon 工程中，系统内部出现了两个包含 OPC UA PubSub 通讯与解析逻辑的项目：
+
+1. **`UniCon.Drivers.OpcUaPubSub`** (自研驱动层，提供 `IUniconDriver` 适配)
+2. **`UniCon.OpcUaPubSub.Client`** (西门子通讯 SDK 层，提供协议细节实现)
+
+本篇文档旨在从架构设计角度，深度剖析这两个组件在职责、依赖、运行机制上的重叠性，并评估如何优雅地将它们进行统一合并，以求实现极佳的生产级工程结构。
+
+***
+
+## 核心职责与重叠点分析 (Responsibility & Overlap Analysis)
+
+为了明确二者是否能够合并，首先需要理清它们各自的核心职能与定位：
+
+```mermaid
+graph TD
+    subgraph UniCon Core Ecosystem
+        Core["UniCon.Core (IUniconDriver, DriverBase, Watchdog)"] --> Driver["UniCon.Drivers.OpcUaPubSub"]
+    end
+    
+    subgraph Siemens PubSub Core (SDK)
+        Driver --> ClientSDK["UniCon.OpcUaPubSub.Client"]
+        ClientSDK --> BinarySDK["UniCon.OpcUaPubSub.Binary"]
+    end
+```
+
+### 1. 职责对比矩阵
+
+| 特性 / 职责 | `UniCon.Drivers.OpcUaPubSub` | `UniCon.OpcUaPubSub.Client` |
+| :--- | :--- | :--- |
+| **层级定位 (Layer)** | **Domain / Application 驱动适配层** | **Infrastructure 协议协议底座层** |
+| **对外接口 (Interface)** | 统一实现 `IUniconDriver` 接口 | 自定义 API (`TestClient`, `Client` 等) |
+| **核心职责 (Responsibility)** | 挂载 UniCon 自愈看门狗 (Watchdog)、指数退避重连算法、统一的统一状态输出。 | OPC UA PubSub 规范标准协议实现（数据块分包分片 Chunking、安全证书 TLS、证书缓存机制、模拟器）。 |
+| **核心依赖 (Dependencies)** | `UniCon.Core` (高度耦合) | 纯净第三方库 (`MQTTnet` 等，完全不依赖 `UniCon.Core`) |
+| **通讯栈支持 (Transports)** | UDP (多播) 与 MQTT | MQTT 传输为主 (带 TLS 与模拟控制) |
+
+### 2. 重叠领域分析
+
+* **传输层重叠**：`UniCon.Drivers.OpcUaPubSub` 中自行编写了 `MqttPubSubTransport.cs`，而西门子的 `Client.cs` 内部同样基于 `MQTTnet` 封装了 Mqtt 客户端连接与订阅逻辑。
+* **模拟与配置重叠**：西门子库内置了 `Settings` 和 `Simulation` 逻辑，用于快速生成本地 PubSub 模拟流；而 UniCon 拥有自身完善的配置体系与驱动注册中心。
+
+***
+
+## 统一合并方案评估 (Integration Strategies)
+
+对于重叠的部分，我们主要有两种可行的架构重构选择：
+
+### 方案 A：直接合二为一（将驱动逻辑彻底合并进 `Client` 中）
+
+**做法**：将 `UniCon.Drivers.OpcUaPubSub` 物理删除，并让 `UniCon.OpcUaPubSub.Client` 直接引用 `UniCon.Core`，并使 `Client.cs` 直接继承 `DriverBase` 并实现 `IUniconDriver`。
+
+* **❌ 缺点（严重违背 Clean Architecture 精神）**：
+  1. **污染基础协议 SDK**：西门子 `Client` 项目定位为纯净的 OPC UA 协议层，如果不加节制地让其强行依赖 `UniCon.Core`，它将彻底失去独立作为 SDK 被其他项目二次复用的能力。
+  2. **违反单一职责原则 (SRP)**：西门子库需要承载繁重的证书管理、分包重组（Chunking）、数据帧打包逻辑。如果还要承担自愈监控看门狗、指数退避策略等 UniCon 框架特有逻辑，将导致该项目异常臃肿。
+  3. **升级与维护地狱**：一旦未来西门子官方 GitHub 仓库发布了关键 Bug 修复或协议更新（如支持 OPC UA PubSub 1.05 新特性），合并后的项目将由于内部高度定制化，无法平滑同步上游代码。
+
+### 方案 B：保持物理分离，实施「适配器模式」(Adapter Pattern) 进行统一集成（🏆 强烈推荐）
+
+**做法**：
+
+* **西门子项目定位**：`UniCon.OpcUaPubSub.Client` 和 `Binary` 作为**纯粹的基础设施依赖 (Infrastructure Dependency)**，不依赖任何 UniCon Core 命名空间。
+* **驱动项目定位**：`UniCon.Drivers.OpcUaPubSub` 作为标准的**适配器 (Adapter)**。
+* **重构方案**：将驱动层内手写的 `MqttPubSubTransport.cs` 移除，代之以直接实例化并调用 `UniCon.OpcUaPubSub.Client.Client`，让驱动只负责生命周期 and 自愈看门狗调度。
+
+```mermaid
+classDiagram
+    class IUniconDriver {
+        <<interface>>
+        +ConnectAsync()
+        +SubscribeAsync()
+    }
+    class DriverBase {
+        <<abstract>>
+        #OnConnectAsync()
+        #OnDisconnectAsync()
+        #WatchdogTask()
+    }
+    class OpcUaPubSubDriver {
+        -UniCon.OpcUaPubSub.Client.Client _siemensClient
+        #OnConnectAsync()
+        #OnDisconnectAsync()
+    }
+    
+    IUniconDriver <|.. DriverBase
+    DriverBase <|-- OpcUaPubSubDriver
+    OpcUaPubSubDriver --> "1" UniCon.OpcUaPubSub.Client.Client : 委派协议底层执行
+```
+
+* **🏆 优势**：
+  1. **完美的依赖隔离**：完全符合 **Domain → Application → Infrastructure** 依赖倒置原则。
+  2. **架构极致清晰**：
+     * 西门子库负责：*怎么收发 OPC UA 消息*。
+     * 驱动层负责：*UniCon 框架怎么管理这个驱动的连接与自愈*。
+  3. **顺滑同步上游**：由于西门子底层代码没有被 UniCon 框架代码侵入，未来如果西门子库升级，可以直接进行源码级的替换而不需要二次修改。
+  4. **一致的开发体验**：该设计与项目里 `UniCon.Drivers.S7`（完全包装第三方 `S7.Net` SDK）的架构理念完全一致，具有极佳的对称美感。
+
+***
+
+## 下一步重构行动建议 (Recommended Action Plan)
+
+为了实现方案 B 的优雅适配，我们应该在接下来的演进中采取以下步骤：
+
+1. **保留三方包纯净度**：不再对 `UniCon.opc.ua.pubsub.Binary/Client` 的内部逻辑做任何 UniCon 相关的耦合修改，维持其通用的协议 SDK 定位。
+2. **重构驱动传输委派**：在 `UniCon.Drivers.OpcUaPubSub` 中，重新定义 `IPubSubTransport` 的实现：
+   * 对于 MQTT，底层的 `MqttPubSubTransport` 可以逐步重构为直接包装 `UniCon.OpcUaPubSub.Client.Client` 的类，由其统一管理证书、 settings 配置与 MQTT 订阅流。
+   * 通过此种包装，我们极大地简化了自研驱动底层的网络交互代码，转而享受成熟、高并发的工业级 Client 实现。
+
+---
+
+---
+url: /docs/4uqwr9yo/index.md
+---
+# 连接自愈管理器 (IConnectionManager)
+
+## 概述 (Overview)
+
+连接自愈管理器 `IConnectionManager` 是 UniCon 核心框架中负责所有南向物理驱动生命周期装载、连接自愈拉起、在线状态查询及优雅注销的统一中心组件。它彻底解耦了具体驱动与北向业务层，并提供基于 `Task` 的完备异步生命周期管理能力。
+
+由于所有继承自 `DriverBase` 的驱动实例均内置了高并发 Watchdog 线程，`IConnectionManager` 在拉起初始连接后，将连接状态的健康监测与指数退避重连托管给驱动内部完成，自身则作为运行中实例的全局物理句柄托管中心。
+
+**重要**：在 `AddUniCon()` 已注册的项目中，推荐通过 `IDriverRegistry.CreateDriver()` 工厂方法创建驱动（所有依赖由 DI 自动装配），而不是手动 `new` 驱动实例。
+
+## 使用方法 (Usage)
+
+在外部项目中，无需手动装配。只需通过核心库提供的依赖注入扩展方法进行一键注册：
+
+```csharp
+// 在 Program.cs 中一键初始化全套组件
+builder.Services.AddUniCon();
+```
+
+注册后，可在任何控制器、服务或后台任务中通过构造函数注入使用：
+
+```csharp
+public class Worker
+{
+    private readonly IConnectionManager _connectionManager;
+
+    public Worker(IConnectionManager connectionManager)
+    {
+        _connectionManager = connectionManager;
+    }
+}
+```
+
+## 参数说明 (Parameters)
+
+### 1. 异步注册并激活驱动 (RegisterDriverAsync)
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| driver | `IUniconDriver` | 需要托管并激活的驱动实例 | 是 | 无 |
+| connectionString | `string` | 对应工控驱动专用的连接配置字符串 | 是 | 无 |
+| ct | `CancellationToken` | 异步控制令牌 | 否 | `default` |
+
+### 2. 异步注销并关闭驱动 (UnregisterDriverAsync)
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| driverId | `string` | 驱动唯一标识 ID | 是 | 无 |
+| ct | `CancellationToken` | 异步控制令牌 | 否 | `default` |
+
+***
+
+## 返回值 (Returns)
+
+### 1. RegisterDriverAsync & UnregisterDriverAsync
+
+| 类型 | 说明 |
+|------|------|
+| `Task` | 异步处理任务契约，可配合 `await` 等待连接就绪或连接断开释放 |
+
+### 2. GetDriver
+
+| 类型 | 说明 |
+|------|------|
+| `IUniconDriver?` | 返回被托管的驱动实例物理引用；若指定 ID 不存在或已被销毁，则返回 `null` |
+
+***
+
+## 使用示例 (Examples)
+
+**示例 1：后台 Worker 通过 Registry 工厂创建并托管 S7 驱动（推荐）**
+
+```csharp
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using UniCon.Core;
+
+public class S7ConnectorService : BackgroundService
+{
+    private readonly IDriverRegistry _driverRegistry;
+    private readonly IConnectionManager _connectionManager;
+
+    public S7ConnectorService(IDriverRegistry driverRegistry, IConnectionManager connectionManager)
+    {
+        _driverRegistry = driverRegistry;
+        _connectionManager = connectionManager;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // 通过工厂创建驱动，DI 自动注入 ILogger、IUniconCacheProvider、INetworkMonitor
+        var driver = _driverRegistry.CreateDriver("S7", "Line1_PLC");
+        _driverRegistry.Register(driver);
+
+        // 异步拉起连接，失败后 Watchdog 自动指数退避自愈重连
+        await _connectionManager.RegisterDriverAsync(
+            driver,
+            "CpuType=S71500;Ip=192.168.0.10;Rack=0;Slot=1",
+            stoppingToken
+        );
+
+        // 查询设备运行状态
+        var registeredDriver = _connectionManager.GetDriver("Line1_PLC");
+        if (registeredDriver != null)
+        {
+            Console.WriteLine($"驱动状态: {registeredDriver.State}, 是否连通: {registeredDriver.IsConnected}");
+        }
+    }
+}
+```
+
+**示例 2：运行时动态注销驱动**
+
+```csharp
+// 注销后驱动的 Watchdog 线程停止、Socket 连接关闭、资源释放
+await _connectionManager.UnregisterDriverAsync("Line1_PLC");
+```
+
+**示例 3：监听驱动状态变化**
+
+```csharp
+var driver = _connectionManager.GetDriver("Line1_PLC");
+if (driver != null)
+{
+    driver.StateChanged += (_, e) =>
+    {
+        Console.WriteLine($"[{e.DriverId}] {e.OldState} → {e.NewState}");
+        // 可在此触发告警、日志上报等北向联动
+    };
+}
+```
+
+---
+
+---
+url: /docs/5mlpfn5w/index.md
+---
+# HTTP 任务 (HttpJob)
+
+## 概述 (Overview)
+
+`HttpJob` 是 UniCon 内置的 HTTP 请求定时任务，基于 `IHttpClientFactory` 实现，支持 GET、POST、PUT、DELETE 等所有标准 HTTP 方法。可配置请求头、Query 参数及请求体，适用于定时向云平台 Webhook、RESTful API 发送数据或心跳包。
+
+任务执行结果记录在日志系统中，不抛出异常（异常时降级为日志记录），保证调度器稳定运行。
+
+## 使用方法 (Usage)
+
+通过 `JobScheduler.ScheduleJobAsync<HttpJob>()` 注册任务，使用 `JobDataMap` 传入参数：
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "PushDataToCloud",
+    cronExpression: "0 0/5 * * * ?",
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]    = "https://api.example.com/v1/data",
+        [JobDataKeys.HttpMethod] = "POST",
+        [JobDataKeys.HttpBody]   = "{\"deviceId\": \"PLC_01\", \"status\": \"running\"}",
+        [JobDataKeys.HttpHeaders]= "{\"Authorization\": \"Bearer token123\", \"Content-Type\": \"application/json\"}"
+    }
+);
+```
+
+## 参数说明 (Parameters)
+
+通过 `JobDataMap` 传递以下键值（使用 `JobDataKeys` 常量类访问，避免拼写错误）：
+
+| JobDataKeys 常量 | 实际键名 | 类型 | 说明 | 是否必填 | 默认值 |
+|-----------------|---------|------|------|----------|--------|
+| `JobDataKeys.HttpUrl` | `Job_Http_Url` | `string` | 目标 URL | 是 | — |
+| `JobDataKeys.HttpMethod` | `Job_Http_Method` | `string` | 请求方法（`GET`、`POST`、`PUT`、`DELETE` 等） | 否 | `"GET"` |
+| `JobDataKeys.HttpHeaders` | `Job_Http_Headers` | `string` | JSON 序列化的请求头字典 `Dictionary<string, string>` | 否 | 无 |
+| `JobDataKeys.HttpQueryParams` | `Job_Http_QueryParams` | `string` | JSON 序列化的 Query 参数字典 `Dictionary<string, string>` | 否 | 无 |
+| `JobDataKeys.HttpBody` | `Job_Http_Body` | `string` | 请求体字符串（固定以 `application/json` 编码发送） | 否 | 无 |
+
+## 返回值 (Returns)
+
+`HttpJob` 为异步执行任务，无直接返回值。执行结果通过日志系统记录：
+
+| 情况 | 日志级别 | 内容 |
+|------|---------|------|
+| 执行开始 | `Information` | `Executing HttpJob: {Method} {Url}` |
+| 执行成功 | `Information` | `HttpJob response: {StatusCode}` |
+| URL 为空 | `Warning` | `HttpJob skipped: URL is null or empty.` |
+| 执行失败 | `Error` | `HttpJob request failed. {Exception}` |
+| Query 参数解析失败 | `Error` | `Failed to parse HttpJob query parameters. {Exception}` |
+| 请求头解析失败 | `Error` | `Failed to apply HttpJob headers. {Exception}` |
+
+## 使用示例 (Examples)
+
+**示例 1：每 5 分钟 POST 数据到云端 Webhook**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "PushDataToCloud",
+    cronExpression: "0 0/5 * * * ?",  // 每 5 分钟
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]     = "https://api.example.com/v1/data",
+        [JobDataKeys.HttpMethod]  = "POST",
+        [JobDataKeys.HttpBody]    = "{\"deviceId\": \"PLC_01\", \"status\": \"running\"}",
+        [JobDataKeys.HttpHeaders] = "{\"Authorization\": \"Bearer token123\"}"
+    }
+);
+```
+
+**示例 2：带 Query 参数的定时 GET 请求**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "QueryCloudConfig",
+    cronExpression: "0 0 * * * ?",  // 每小时
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]         = "https://config.example.com/api/settings",
+        [JobDataKeys.HttpMethod]      = "GET",
+        [JobDataKeys.HttpQueryParams] = "{\"gatewayId\": \"GW_01\", \"version\": \"2\"}"
+    }
+);
+```
+
+**示例 3：每 5 分钟 GET 心跳检测**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "Heartbeat",
+    cronExpression: "0 0/5 * * * ?",
+    data: new JobDataMap
+    {
+        [JobDataKeys.HttpUrl]    = "https://api.example.com/heartbeat",
+        [JobDataKeys.HttpMethod] = "GET"
+    }
+);
+```
+
+---
+
+---
+url: /docs/77hr4gzb/index.md
+---
+# 通讯联动任务 (CommunicationJob)
+
+## 概述 (Overview)
+
+`CommunicationJob` 是 UniCon 内置的设备通讯定时任务，通过 `IDriverRegistry` 获取已注册的驱动实例，在指定 Cron 表达式触发时，对目标物理设备地址执行**定时读取**或**定时写入**操作。
+
+读写结果记录在日志系统中。任务使用 Quartz 提供的 `context.CancellationToken` 处理任务取消，使用反射机制支持任意泛型数据类型的读写调用。
+
+> **前提**：目标驱动必须已通过 `IDriverRegistry.Register()` 注册，且驱动状态为 `Connected`（`IsConnected == true`），否则任务将跳过本次执行。
+
+## 使用方法 (Usage)
+
+通过 `JobScheduler.ScheduleJobAsync<CommunicationJob>()` 注册，使用 `JobDataMap` 传入参数：
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadTemperature",
+    cronExpression: "0/10 * * * * ?",  // 每 10 秒
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBD0",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Single"  // float
+    }
+);
+```
+
+## 参数说明 (Parameters)
+
+通过 `JobDataMap` 传递以下键值（使用 `JobDataKeys` 常量类访问）：
+
+| JobDataKeys 常量 | 实际键名 | 类型 | 说明 | 是否必填 | 默认值 |
+|-----------------|---------|------|------|----------|--------|
+| `JobDataKeys.CommDriverId` | `Job_Comm_DriverId` | `string` | 已注册的驱动唯一 ID（必须已通过 Register 注册且在线） | 是 | — |
+| `JobDataKeys.CommAddress` | `Job_Comm_Address` | `string` | 目标通讯地址（格式与协议相关，如 `DB1.DBD0`、`holding:1`） | 是 | — |
+| `JobDataKeys.CommOperation` | `Job_Comm_Operation` | `string` | 操作类型：`"Read"` 或 `"Write"`（大小写不敏感） | 否 | `"Read"` |
+| `JobDataKeys.CommValue` | `Job_Comm_Value` | `object` | 写入时的目标值（Write 操作必填） | 否 | `null` |
+| `JobDataKeys.CommDataType` | `Job_Comm_DataType` | `string` | 数据类型的完整名称（如 `"System.Single"`, `"System.Boolean"`, `"System.Int16"`） | 否 | `"System.Object"` |
+
+## 返回值 (Returns)
+
+`CommunicationJob` 为异步执行任务，结果记录在日志系统中：
+
+| 情况 | 日志级别 | 内容 |
+|------|---------|------|
+| 读取完成 | `Information` | `Read Response: {UniconResponse}` |
+| 写入完成 | `Information` | `Write Response: {UniconResponse}` |
+| 驱动不存在或未连接 | — | 任务静默跳过（无日志） |
+| 执行异常 | `Error` | `CommunicationJob failed for {driverId}` |
+
+## 使用示例 (Examples)
+
+**示例 1：每 10 秒定时读取 S7 温度（float）**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadTemperature",
+    cronExpression: "0/10 * * * * ?",
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBD0",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Single"
+    }
+);
+```
+
+**示例 2：每天零点自动重置 PLC 计数器（写入 0）**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ResetDailyCounter",
+    cronExpression: "0 0 0 * * ?",  // 每天 00:00:00
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "PLC_Line1",
+        [JobDataKeys.CommAddress]   = "DB1.DBW10",
+        [JobDataKeys.CommOperation] = "Write",
+        [JobDataKeys.CommValue]     = 0,
+        [JobDataKeys.CommDataType]  = "System.Int16"
+    }
+);
+```
+
+**示例 3：每分钟读取 Modbus 仪表电流（int）**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "ReadMeterCurrent",
+    cronExpression: "0 * * * * ?",  // 每分钟
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "Meter_01",
+        [JobDataKeys.CommAddress]   = "holding:30001",
+        [JobDataKeys.CommOperation] = "Read",
+        [JobDataKeys.CommDataType]  = "System.Int32"
+    }
+);
+```
+
+**示例 4：每 30 秒向 MQTT 发布网关心跳**
+
+```csharp
+await jobScheduler.ScheduleJobAsync<CommunicationJob>(
+    jobId: "MqttHeartbeat",
+    cronExpression: "0/30 * * * * ?",  // 每 30 秒
+    data: new JobDataMap
+    {
+        [JobDataKeys.CommDriverId]  = "Cloud_Broker",
+        [JobDataKeys.CommAddress]   = "gateway/heartbeat",
+        [JobDataKeys.CommOperation] = "Write",
+        [JobDataKeys.CommValue]     = "{\"status\": \"alive\"}",
+        [JobDataKeys.CommDataType]  = "System.String"
+    }
+);
+```
+
+---
+
+---
+url: /docs/7nj6xtl2/index.md
+---
+# Job Scheduler (任务调度器)
+
+## 概述 (Overview)
+
+`JobScheduler` 是 UniCon 任务调度系统的核心管理器。它基于 Quartz.NET 进行了高级封装，旨在为南向驱动点位交互、北向 HTTP 接口联动及系统后台自愈提供高可靠、精细化的定时任务执行管理能力。
+
+它解决了以下问题：
+
+1. 提供完整的定时任务生命周期管理 (CRUD)。
+2. 支持任务的秒级高精度 CRON 触发。
+3. 统计当前处于活动执行状态的任务数量，以便系统性能监控。
+4. 全面支持 ASP.NET Core 的依赖注入 (DI) 和最小 Web API。
+
+## 使用方法 (Usage)
+
+通过 `IServiceCollection` 的一键扩展方法 `AddUniConJobs()` 完成容器注入，随后可以通过构造函数注入 `JobScheduler` 进行调用。
+
+```csharp
+// 1. 在 Program.cs 中注入
+builder.Services.AddUniConJobs();
+
+// 2. 构造函数注入调用
+public class MyService
+{
+    private readonly JobScheduler _scheduler;
+    public MyService(JobScheduler scheduler)
+    {
+        _scheduler = scheduler;
+    }
+}
+```
+
+## 参数说明 (Parameters)
+
+### `ScheduleJobAsync<T>` 参数
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| jobId | `string` | 任务的唯一标识 ID | 是 | - |
+| cronExpression | `string` | 标准 Quartz CRON 触发表达式 | 是 | - |
+| data | `JobDataMap` | 伴随任务运行的外部参数映射 | 否 | `null` |
+
+### UpdateJobAsync 参数
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| jobId | `string` | 任务的唯一标识 ID | 是 | - |
+| cronExpression | `string` | 新的标准 Quartz CRON 触发表达式 | 是 | - |
+| data | `JobDataMap` | 新的外部参数映射，如果不为 null 则更新 | 否 | `null` |
+
+## 返回值 (Returns)
+
+### GetExecutingJobsCountAsync 返回值
+
+| 类型 | 说明 |
+|------|------|
+| `Task<int>` | 返回当前处于运行状态的任务总数。 |
+
+### GetJobsAsync 返回值
+
+| 类型 | 说明 |
+|------|------|
+| `Task<List<JobInfo>>` | 返回所有已调度任务元数据及其运行状态的列表。 |
+
+### UpdateJobAsync / DeleteJobAsync 返回值
+
+| 类型 | 说明 |
+|------|------|
+| `Task<bool>` | 表示该操作是否成功执行（如果找不到指定的 Job，则返回 `false`）。 |
+
+## 使用示例 (Examples)
+
+**示例1：动态注册并安排一个 HttpJob 任务**
+
+```csharp
+var jobData = new JobDataMap
+{
+    [JobDataKeys.HttpUrl] = "https://api.unicontroller.com/heartbeat",
+    [JobDataKeys.HttpMethod] = "GET"
+};
+
+await jobScheduler.ScheduleJobAsync<HttpJob>(
+    jobId: "ControllerHeartbeat",
+    cronExpression: "0 0/5 * * * ?", // 每 5 分钟执行一次
+    data: jobData
+);
+```
+
+**示例2：查询所有任务并在控制台打印**
+
+```csharp
+var jobs = await jobScheduler.GetJobsAsync();
+foreach (var job in jobs)
+{
+    Console.WriteLine($"Job: {job.JobId}, Type: {job.JobType}, Status: {job.Status}");
+}
+```
+
+**示例3：更新已有任务的触发时间与参数**
+
+```csharp
+var newJobData = new JobDataMap
+{
+    [JobDataKeys.HttpUrl] = "https://api.unicontroller.com/v2/heartbeat",
+    [JobDataKeys.HttpMethod] = "POST"
+};
+
+bool isUpdated = await jobScheduler.UpdateJobAsync(
+    jobId: "ControllerHeartbeat",
+    cronExpression: "0/30 * * * * ?", // 缩短为每 30 秒执行一次
+    data: newJobData
+);
+```
+
+---
+
+---
+url: /docs/d7z01nn3/index.md
+---
+# 动态驱动管理接口 (Dynamic Driver API)
+
+## 概述 (Overview)
+
+`CommunicationService` 提供了系统内通讯驱动的动态生命周期管理以及通过统一网关执行的强类型反射式读写交互。外部应用可通过 RESTful 接口进行设备点位的热插拔和统一数据集成。
+
+## 使用方法 (Usage)
+
+以单例模式注册在依赖注入 (DI) 容器中，作为 Minimal APIs 或 Controllers 的核心处理器。
+
+## 参数说明 (Parameters)
+
+### 1. 驱动注册 (CreateDriverRequest)
+
+| 参数名 | 类型 | 说明 | 必填 |
+|--------|------|------|------|
+| DriverId | string | 驱动的全局唯一标识 ID | 是 |
+| DriverType | string | 协议类型（`S7`, `Modbus`, `OpcUa`, `Mqtt`, `OpcUaPubSub`） | 是 |
+| ConnectionString | string | 物理连接字符串 | 是 |
+
+### 2. 强类型读取 (Read Tag)
+
+| 参数名 | 类型 | 说明 | 必填 |
+|--------|------|------|------|
+| address | string | 通信物理地址 | 是 |
+| type | string | 目标数据类型指示（如 `int`, `float`, `string`） | 否 |
+
+### 3. 强类型写入 (WriteAddressRequest)
+
+| 参数名 | 类型 | 说明 | 必填 |
+|--------|------|------|------|
+| Address | string | 通信物理地址 | 是 |
+| Value | object | 写入的数值（JSON 格式） | 是 |
+| TypeHint | string | 强类型映射指示（用于精确序列化字节流） | 否 |
+
+***
+
+## 返回值 (Returns)
+
+### 数据读取结构 (DataValue\<object>)
+
+| 属性名 | 类型 | 说明 |
+|--------|------|------|
+| Value | object? | 读取出的强类型物理数据 |
+| Status | string | 数据状态戳 (`Good`, `Bad`, `Uncertain`, `Timeout`) |
+| Quality | string | OPC UA 兼容 16 位质量码 |
+| SourceTimestamp | DateTime | 数据源/PLC 生成时间戳 |
+| ServerTimestamp | DateTime | 网关内部收到数据的时间戳 |
+
+***
+
+## 使用示例 (Examples)
+
+### 示例 1：动态添加并连接 S7 驱动
+
+**POST /api/drivers**
+
+```json
+{
+  "driverId": "S7_CPU_01",
+  "driverType": "S7",
+  "connectionString": "CpuType=S71200;Ip=192.168.0.100;Rack=0;Slot=1"
+}
+```
+
+### 示例 2：反射强类型读取
+
+**GET /api/drivers/S7\_CPU\_01/read?address=DB1.DBD0\&type=float**
+
+```json
+{
+  "value": 45.28,
+  "status": 0,
+  "quality": 0,
+  "sourceTimestamp": "2026-05-18T00:46:12.345Z",
+  "serverTimestamp": "2026-05-18T00:46:12.350Z"
+}
+```
+
+### 示例 3：反射强类型写入
+
+**POST /api/drivers/S7\_CPU\_01/write**
+
+```json
+{
+  "address": "DB1.DBX4.0",
+  "value": true,
+  "typeHint": "bool"
+}
+```
+
+### 示例 4：订阅与轮询缓存获取
+
+注意：`CommunicationService` 中的订阅会自动在回调中更新注入的 `IUniconCacheProvider` 缓存介质。
+
+**POST /api/drivers/S7\_CPU\_01/subscribe**
+
+```json
+{
+  "address": "DB1.DBD8"
+}
+```
+
+**GET /api/drivers/S7\_CPU\_01/subscriptions**
+*(从 CacheProvider 中提取最近一笔值)*
+
+```json
+[
+  {
+    "driverId": "S7_CPU_01",
+    "address": "DB1.DBD8",
+    "value": 102.5,
+    "quality": "Good",
+    "timestamp": "2026-05-18T00:49:15.823Z"
+  }
+]
+```
+
+---
+
+---
+url: /docs/driver-registry/index.md
+---
+# 驱动注册与创建中心 (Driver Registry & Factory)
+
+## 概述 (Overview)
+
+`IDriverRegistry` 是 UniCon 框架的核心基础设施，负责两大职责：
+
+1. **实例生命周期管理**：维护运行时活跃的驱动实例（如 S7、Modbus），提供注册、注销、查询等 API，实现跨层共享。
+2. **动态工厂与即插即用**：通过 `[UniconDriver]` 特性自动扫描驱动程序集，支持别名注册、基于别名或强类型创建驱动实例，免除手动配置。
+
+该中心结合了 **Registry API** 与 **Factory API**，实现了驱动的统一托管与零配置装配。
+
+## 使用方法 (Usage)
+
+### 1. 注册核心服务
+
+在 `Program.cs`（或 `Startup.cs`）的依赖注入阶段加入 UniCon 核心服务：
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+// 自动注入 IDriverRegistry 与 DriverRegistry 实现
+builder.Services.AddUniCon(); // 包含 services.AddSingleton<IDriverRegistry, DriverRegistry>();
+```
+
+### 2. 启动时自动发现驱动
+
+在应用构建完成后调用自发现方法，完成插件式驱动加载：
+
+```csharp
+var app = builder.Build();
+var driverRegistry = app.Services.GetRequiredService<IDriverRegistry>();
+driverRegistry.DiscoverAndRegisterDrivers(); // 自动扫描并注册所有带 [UniconDriver] 的驱动
+```
+
+### 3. 业务层使用
+
+```csharp
+public class PlcManager
+{
+    private readonly IDriverRegistry _driverRegistry;
+    private readonly IConnectionManager _connectionManager;
+
+    public PlcManager(IDriverRegistry driverRegistry, IConnectionManager connectionManager)
+    {
+        _driverRegistry = driverRegistry;
+        _connectionManager = connectionManager;
+    }
+
+    // 示例见后文
+}
+```
+
+## 参数说明 (Parameters)
+
+| 方法 | 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|------|--------|------|------|----------|--------|
+| `Register` | `driver` | `IUniconDriver` | 待托管的驱动实例 | ✅ | — |
+| `Unregister` | `driverId` | `string` | 需要注销的驱动唯一标识 | ✅ | — |
+| `Get` | `driverId` | `string` | 查询已托管的驱动实例 | ✅ | — |
+| `RegisterDriverType` | `driverType` | `string` | 驱动别名（如 `"S7"`） | ✅ | — |
+|  | `implementationType` | `Type` | 驱动实现类 | ✅ | — |
+| `CreateDriver` (别名) | `driverType` | `string` | 别名对应的驱动类型 | ✅ | — |
+|  | `driverId` | `string` | 新实例唯一标识 | ✅ | — |
+| `CreateDriver<T>` | `driverId` | `string` | 强类型驱动实例唯一标识 | ✅ | — |
+| `DiscoverAndRegisterDrivers` | — | — | 自动扫描并注册所有标记的驱动 | — | — |
+
+## 返回值 (Returns)
+
+| 方法 | 类型 | 说明 |
+|------|------|------|
+| `Register` | `void` | 无返回，仅将实例加入托管中心 |
+| `Unregister` | `bool` | 注销成功返回 `true`，未找到返回 `false` |
+| `Get` | `IUniconDriver?` | 若存在返回实例，否则 `null` |
+| `GetAll` | `IEnumerable<IUniconDriver>` | 所有活跃驱动的只读集合 |
+| `CreateDriver` | `IUniconDriver` | 创建并返回指定别名的驱动实例 |
+| `CreateDriver<T>` | `T` where `T : IUniconDriver` | 强类型创建并返回驱动实例 |
+| `DiscoverAndRegisterDrivers` | `void` | 自动发现后无直接返回值 |
+
+## 使用示例 (Examples)
+
+### 示例 1：泛型方式零摩擦创建并注册驱动
+
+```csharp
+public class PlcManager
+{
+    private readonly IDriverRegistry _driverRegistry;
+    private readonly IConnectionManager _connectionManager;
+
+    public PlcManager(IDriverRegistry driverRegistry, IConnectionManager connectionManager)
+    {
+        _driverRegistry = driverRegistry;
+        _connectionManager = connectionManager;
+    }
+
+    public async Task InitializeLine1PlcAsync()
+    {
+        // 通过泛型创建 S7 驱动，框架自动装配日志、缓存等依赖
+        var plcDriver = _driverRegistry.CreateDriver<S7Driver>("PLC_01");
+        // 注册至中心托管
+        _driverRegistry.Register(plcDriver);
+        // 激活连接（示例）
+        await _connectionManager.RegisterDriverAsync(plcDriver, "ip=192.168.1.100;cputype=S71200");
+    }
+}
+```
+
+### 示例 2：基于配置别名的即插即用创建
+
+```csharp
+// 假设从数据库或配置文件读取到别名与 ID
+string driverAlias = "S7"; // 业务配置的驱动类型
+string driverId = "PLC_Line2";
+
+// 已在程序启动时调用 DiscoverAndRegisterDrivers()
+IUniconDriver driver = _driverRegistry.CreateDriver(driverAlias, driverId);
+_driverRegistry.Register(driver);
+```
+
+***
+
+> **更新记录**：本次文档同步至 `src/UniCon.Core/IDriverRegistry.cs`（v2.3），保持接口签名与示例代码一致。
+
+---
+
+---
+url: /docs/e2s2408d/index.md
+---
+# 标签交互接口 (Tag Endpoints)
+
+## 使用方法 (Usage)
+
+通过外部 HTTP 客户端调用，实现对系统内逻辑标签的读写。
+
+## 参数签名 (Parameters)
+
+* **GET /tags/{name}**:
+  * `name` (path): 逻辑标签名称。
+* **POST /tags/{name}**:
+  * `name` (path): 逻辑标签名称。
+  * `body` (JSON): 待写入的值对象。
+
+## 返回签名 (Returns)
+
+* **GET**: 返回 `Tag` 对象 JSON。
+* **POST**: 返回 `UniconResponse<bool>` JSON。
+  * 成功：200 OK。
+  * 失败：400 BadRequest。
+
+## 使用案例 (Examples)
+
+### 1. 使用 cURL 读取标签
+
+```bash
+curl -X GET "https://localhost:5001/tags/Temperature"
+```
+
+### 2. 使用 HttpClient 写入标签 (C#)
+
+```csharp
+var client = new HttpClient();
+var response = await client.PostAsJsonAsync("https://localhost:5001/tags/SetPoint", 25.5);
+
+if (response.IsSuccessStatusCode)
+{
+    var result = await response.Content.ReadFromJsonAsync<UniconResponse<bool>>();
+    Console.WriteLine($"Write Success: {result.Data}");
+}
+```
+
+---
+
+---
+url: /docs/epkdeoc1/index.md
+---
+# MQTT 消息驱动 (MQTT Message Driver)
+
+## 概述 (Overview)
+
+MQTT 消息驱动用于轻量级工业 IoT 消息传输及事件驱动的发布/订阅模式。驱动底层依赖 `MQTTnet` 库实现，支持 MQTT 3.1/5.0 协议，可选 SSL/TLS 安全连接。
+
+**重要**：MQTT 属于 Push（推送）型协议，订阅直接映射为底层 Broker 的 Topic 订阅，**不经过 `ScanScheduler` 主动轮询调度**，而是由网络事件触发回调。因此 `ReadAsync` 不受支持（返回 `405 Not Supported`）。
+
+驱动已通过挂载 `IMqttClient.DisconnectedAsync` 事件实现断线即时感知，状态流转到 `DriverState.Faulted` 后由 Watchdog 自动重连。
+
+## 使用方法 (Usage)
+
+通过 `IDriverRegistry` 工厂方法创建（推荐，DI 自动装配依赖）：
+
+```csharp
+// 通过别名工厂创建（DI 自动装配 ILogger, IUniconCacheProvider, INetworkMonitor）
+var driver = _driverRegistry.CreateDriver("Mqtt", "Cloud_Broker");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(driver, "server=192.168.1.200;port=1883;clientid=gateway_01");
+```
+
+## 参数说明 (Parameters)
+
+### 连接字符串参数
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| server / host | `string` | MQTT Broker 服务的 IP 或主机名 | 是 | 无 |
+| port | `int` | MQTT Broker 端口号 | 否 | `1883` |
+| clientid | `string` | 客户端唯一连接 ID | 否 | 随机 GUID |
+| username / user | `string` | 账户授权登录用户名 | 否 | 空 |
+| password / pwd | `string` | 账户授权登录密码 | 否 | 空 |
+| cleansession | `bool` | 是否清除会话（MQTT 3.1.1）| 否 | `true` |
+| keepalive | `int` | 心跳维持间隔时间（秒） | 否 | `15` |
+| usetls / tls | `bool` | 是否启用 SSL/TLS 安全连接 | 否 | `false` |
+
+### 订阅地址 (Address / Topic)
+
+地址即为 MQTT Topic，支持 MQTT 标准通配符：
+
+* `+`：单层通配符，如 `devices/+/telemetry`
+* `#`：多层通配符，如 `factory/#`
+
+### 发布地址 (WriteAsync address)
+
+`WriteAsync` 的 `request.Address` 即为发布目标 Topic，`value` 为消息字符串内容。
+
+## 返回值 (Returns)
+
+| 方法 | 返回值 | 说明 |
+|------|--------|------|
+| `ReadAsync` | `UniconResponse<T>` | **固定报错 405**，MQTT 不支持主动单次拉取读取 |
+| `WriteAsync<T>` | `UniconResponse<bool>` | 成功发布消息至 Broker 则返回 `true` |
+| `SubscribeAsync` | `Task<string>` | 返回 Topic 本身作为订阅 ID |
+| `UnsubscribeAsync` | `Task` | 向 Broker 取消 Topic 订阅 |
+
+## 使用示例 (Examples)
+
+**示例 1：订阅特定设备遥测主题（支持通配符）**
+
+```csharp
+var driver = _driverRegistry.CreateDriver("Mqtt", "Cloud_Broker");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(driver, "server=192.168.1.200;port=1883;clientid=gateway_01");
+
+// 直接传入 Func 作为回调（支持 MQTT 通配符）
+await driver.SubscribeAsync("devices/+/telemetry", async dataValue =>
+{
+    Console.WriteLine($"Topic 消息: {dataValue.Value}");
+    Console.WriteLine($"到达时间: {dataValue.ServerTimestamp}");
+    await Task.CompletedTask;
+});
+```
+
+**示例 2：向云端发布消息**
+
+```csharp
+var req = new UniconRequest { Address = "gateway/status" };
+var res = await driver.WriteAsync<string>(req, "{\"status\": \"online\", \"driverId\": \"Line1_PLC\"}");
+Console.WriteLine(res.Success ? "消息发布成功" : $"发布失败: {res.Message}");
+```
+
+**示例 3：使用 SSL/TLS 安全连接**
+
+```csharp
+var driver = _driverRegistry.CreateDriver("Mqtt", "SecureBroker");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(
+    driver,
+    "server=broker.example.com;port=8883;username=myuser;password=mypass;usetls=true;clientid=secure_gw_01"
+);
+```
+
+**示例 4：订阅并取消订阅**
+
+```csharp
+// 订阅
+string subId = await driver.SubscribeAsync("factory/line1/#", async dv =>
+{
+    Console.WriteLine($"收到: {dv.Value}");
+    await Task.CompletedTask;
+});
+
+// 按 Topic 取消订阅
+await driver.UnsubscribeAsync("factory/line1/#");
+```
+
+---
+
+---
+url: /docs/fh3tcvy1/index.md
+---
+# Modbus 驱动 (Modbus Driver)
+
+## 概述 (Overview)
+
+Modbus 驱动实现了标准的 Modbus TCP 通讯协议，底层基于 `EasyModbus` 库构建。能够访问 PLC、变频器、智能仪表等广泛设备的线圈 (Coil)、离散输入 (Discrete Input)、保持寄存器 (Holding Register) 及输入寄存器 (Input Register)。
+
+驱动支持在 `InternalReadAsync` / `InternalWriteAsync` 中捕获 Socket 错误或通信异常后自动触发状态流转（`DriverState.Faulted`），由 `DriverBase` Watchdog 在毫秒级内发起自愈重连。
+
+## 使用方法 (Usage)
+
+通过 `IDriverRegistry` 工厂方法创建（推荐，DI 自动装配依赖）：
+
+```csharp
+// 通过别名工厂创建（DI 自动装配 ILogger, IUniconCacheProvider, INetworkMonitor）
+var driver = _driverRegistry.CreateDriver("Modbus", "Meter_01");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(driver, "ip=192.168.0.50;port=502;unitid=1");
+```
+
+## 参数说明 (Parameters)
+
+### 连接字符串参数
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| ip | `string` | Modbus 从站 (Slave) 或服务器的 IP 地址 | 是 | 无 |
+| port | `int` | Modbus 服务的 TCP 端口 | 否 | `502` |
+| unitid / slaveid | `byte` | 从站单元标识符 | 否 | `1` |
+| timeout | `int` | 通讯及连接超时时间（毫秒） | 否 | `2000` |
+
+### 地址格式 (Address)
+
+格式必须为 `[类型]:[偏移地址]`：
+
+| 类型前缀 | 寄存器区 | 读写权限 | 说明 |
+|---------|---------|---------|------|
+| `coil` | 线圈 (0x) | 读写 | 布尔值，如 `coil:1` |
+| `discrete` | 离散输入 (1x) | 只读 | 布尔值，如 `discrete:10001` |
+| `holding` | 保持寄存器 (4x) | 读写 | 16 位整型或浮点，如 `holding:40001` |
+| `input` | 输入寄存器 (3x) | 只读 | 16 位整型，如 `input:30001` |
+
+## 返回值 (Returns)
+
+| 方法 | 返回类型 | 说明 |
+|------|----------|------|
+| `ReadAsync<T>` | `UniconResponse<T>` | `response.Success` 为 true 时，`response.Data.Value` 携带值 |
+| `WriteAsync<T>` | `UniconResponse<bool>` | `true` 成功，`false` 包含错误信息 |
+| `SubscribeAsync` | `Task<string>` | 返回订阅 GUID |
+
+## 使用示例 (Examples)
+
+**示例 1：读取保持寄存器**
+
+```csharp
+var driver = _driverRegistry.CreateDriver("Modbus", "Meter_01");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(driver, "ip=192.168.0.50;port=502;unitid=1");
+
+var req = new UniconRequest { Address = "holding:1" };
+var res = await driver.ReadAsync<int>(req);
+
+if (res.Success && res.Data != null)
+{
+    Console.WriteLine($"寄存器值: {res.Data.Value}，质量: {res.Data.Quality}");
+}
+```
+
+**示例 2：读取线圈（布尔）**
+
+```csharp
+var req = new UniconRequest { Address = "coil:1" };
+var res = await driver.ReadAsync<bool>(req);
+Console.WriteLine($"线圈状态: {res.Data?.Value}");
+```
+
+**示例 3：写入保持寄存器**
+
+```csharp
+var writeReq = new UniconRequest { Address = "holding:40001" };
+var writeRes = await driver.WriteAsync<int>(writeReq, 1500);
+Console.WriteLine(writeRes.Success ? "写入成功" : $"写入失败: {writeRes.Message}");
+```
+
+**示例 4：后台轮询仪表（ExceptionBased 模式）**
+
+```csharp
+await driver.SubscribeAsync(new UniconSubscription
+{
+    Address    = "input:30001",
+    ScanRateMs = 1000,
+    ScanMode   = UniconScanMode.ExceptionBased,
+    Metadata   = new TagMetadata { Unit = "kWh", Deadband = 0.1 },
+    Callback   = async dv =>
+    {
+        Console.WriteLine($"[{dv.ServerTimestamp:HH:mm:ss}] 电量: {dv.Value} kWh");
+        await Task.CompletedTask;
+    }
+});
+```
+
+---
+
+---
+url: /docs/idriverregistry/index.md
+---
+# IDriverRegistry
+
+## 概述 (Overview)
+
+`IDriverRegistry` 是 UniCon 框架的 **驱动注册中心**，负责管理运行时活跃的驱动实例并提供统一的工厂创建能力。它将 **实例生命周期管理 (Registry API)** 与 **别名工厂 (Factory API)** 融合，为业务层、作业系统、ODM 引擎提供统一的驱动访问入口。
+
+## 使用方法 (Usage)
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+// 注入核心服务（其中已包含 IDriverRegistry）
+builder.Services.AddUniCon();
+
+var app = builder.Build();
+var driverRegistry = app.Services.GetRequiredService<IDriverRegistry>();
+// 自动发现并注册所有标记的驱动
+driverRegistry.DiscoverAndRegisterDrivers();
+```
+
+## 参数说明 (Parameters)
+
+| 方法 | 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|------|--------|------|------|----------|--------|
+| `Register` | `driver` | `IUniconDriver` | 待托管的驱动实例 | ✅ | — |
+| `Unregister` | `driverId` | `string` | 需要注销的驱动唯一标识 | ✅ | — |
+| `Get` | `driverId` | `string` | 查询已托管的驱动实例 | ✅ | — |
+| `RegisterDriverType` | `driverType` | `string` | 驱动别名（如 `"S7"`） | ✅ | — |
+|  | `implementationType` | `Type` | 驱动实现类 | ✅ | — |
+| `CreateDriver` (别名) | `driverType` | `string` | 别名对应的驱动类型 | ✅ | — |
+|  | `driverId` | `string` | 新实例唯一标识 | ✅ | — |
+| `CreateDriver<T>` | `driverId` | `string` | 强类型驱动实例唯一标识 | ✅ | — |
+| `DiscoverAndRegisterDrivers` | — | — | 自动扫描所有带 `[UniconDriver]` 标记的驱动并注册 | — | — |
+
+## 返回值 (Returns)
+
+| 方法 | 类型 | 说明 |
+|------|------|------|
+| `Register` | `void` | 无返回，仅将实例加入托管中心 |
+| `Unregister` | `bool` | 成功返回 `true`，若不存在返回 `false` |
+| `Get` | `IUniconDriver?` | 若存在返回实例，否则 `null` |
+| `GetAll` | `IEnumerable<IUniconDriver>` | 所有活跃驱动的只读集合 |
+| `CreateDriver` | `IUniconDriver` | 创建并返回指定别名的驱动实例 |
+| `CreateDriver<T>` | `T` where `T : IUniconDriver` | 强类型创建并返回驱动实例 |
+| `DiscoverAndRegisterDrivers` | `void` | 自动发现后无直接返回值 |
+
+## 使用示例 (Examples)
+
+### 示例 1：在业务服务中获取并使用驱动
+
+```csharp
+public class PlcService
+{
+    private readonly IDriverRegistry _driverRegistry;
+    private readonly IConnectionManager _connectionManager;
+
+    public PlcService(IDriverRegistry driverRegistry, IConnectionManager connectionManager)
+    {
+        _driverRegistry = driverRegistry;
+        _connectionManager = connectionManager;
+    }
+
+    public async Task InitializeAsync()
+    {
+        // 通过别名创建驱动并注册
+        var driver = _driverRegistry.CreateDriver("S7", "PLC_01");
+        _driverRegistry.Register(driver);
+        await _connectionManager.RegisterDriverAsync(driver, "ip=192.168.1.100;cputype=S71200");
+    }
+}
+```
+
+### 示例 2：强类型泛型创建驱动
+
+```csharp
+var driver = _driverRegistry.CreateDriver<S7Driver>("PLC_02");
+_driverRegistry.Register(driver);
+```
+
+***
+
+> **更新记录**：文档已同步至 `src/UniCon.Core/IDriverRegistry.cs`（v2.3），确保所有方法签名、返回类型与示例代码保持一致。
+
+---
+
+---
+url: /docs/iunicondriver/index.md
+---
+# IUniconDriver
+
+## 概述 (Overview)
+
+`IUniconDriver` 是 UniCon 框架中所有南向驱动实现必须遵循的统一接口。它定义了驱动的生命周期、基本读写、批量操作、订阅机制以及状态变更事件，确保业务层、作业系统以及 ODM 引擎能够以统一方式调用各种协议驱动（如 S7、Modbus、OPC UA 等）。
+
+## 使用方法 (Usage)
+
+在自定义驱动实现时继承 `DriverBase`（已实现 `IUniconDriver` 中的大多数方法），仅需重写抽象方法。构造函数必须接收并透传 `INetworkMonitor`（v2.2 起强制要求）：
+
+```csharp
+using UniCon.Core;
+using UniCon.Core.Caching;
+using UniCon.Core.Models;
+using UniCon.Core.Network;
+using Microsoft.Extensions.Logging;
+
+[UniconDriver("MyPlc")]
+public class MyPlcDriver : DriverBase
+{
+    // 必须接收并透传全部 4 个依赖
+    public MyPlcDriver(string driverId, ILogger logger,
+        IUniconCacheProvider cacheProvider, INetworkMonitor networkMonitor)
+        : base(driverId, logger, cacheProvider, networkMonitor) { }
+
+    protected override async Task<bool> OnConnectAsync(string connectionString, CancellationToken ct)
+    {
+        // 建立实际物理连接，返回 true 表示成功
+        return true;
+    }
+
+    protected override Task OnDisconnectAsync(CancellationToken ct)
+    {
+        // 关闭物理连接
+        return Task.CompletedTask;
+    }
+
+    protected override async Task<UniconResponse<T>> InternalReadAsync<T>(UniconRequest request, CancellationToken ct)
+    {
+        // 实现单点读取逻辑
+        throw new NotImplementedException();
+    }
+
+    protected override async Task<UniconResponse<bool>> InternalWriteAsync<T>(UniconRequest request, T value, CancellationToken ct)
+    {
+        // 实现单点写入逻辑
+        throw new NotImplementedException();
+    }
+}
+```
+
+## 参数说明 (Parameters)
+
+| 方法 | 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|------|--------|------|------|----------|--------|
+| `ConnectAsync` | `connectionString` | `string` | 驱动连接字符串 | ✅ | — |
+|  | `ct` | `CancellationToken` | 取消令牌 | 否 | `default` |
+| `DisconnectAsync` | `ct` | `CancellationToken` | 取消令牌 | 否 | `default` |
+| `PingAsync` | `ct` | `CancellationToken` | 取消令牌 | 否 | `default` |
+| `ReadAsync<T>` | `request` | `UniconRequest` | 读取请求（地址、元数据） | ✅ | — |
+|  | `ct` | `CancellationToken` | 取消令牌 | 否 | `default` |
+| `WriteAsync<T>` | `request` | `UniconRequest` | 写入请求 | ✅ | — |
+|  | `value` | `T` | 写入的值 | ✅ | — |
+|  | `ct` | `CancellationToken` | 取消令牌 | 否 | `default` |
+| `ReadBatchAsync` | `requests` | `IEnumerable<UniconRequest>` | 批量读取请求集合 | ✅ | — |
+|  | `ct` | `CancellationToken` | 取消令牌 | 否 | `default` |
+| `WriteBatchAsync` | `writes` | `IEnumerable<(UniconRequest Request, object Value)>` | 批量写入请求集合 | ✅ | — |
+|  | `ct` | `CancellationToken` | 取消令牌 | 否 | `default` |
+| `SubscribeAsync(address, callback)` | `address` | `string` | 订阅的设备地址 | ✅ | — |
+|  | `callback` | `Func<DataValue<object>, Task>` | 异步回调 | ✅ | — |
+| `SubscribeAsync(UniconSubscription)` | `subscription` | `UniconSubscription` | 结构化订阅（含元数据、死区、扫描配置） | ✅ | — |
+| `SubscribeBatchAsync` | `subscriptions` | `IEnumerable<UniconSubscription>` | 批量结构化订阅 | ✅ | — |
+| `UnsubscribeAsync` | `address` | `string` | 按地址取消所有订阅 | ✅ | — |
+| `UnsubscribeByIdAsync` | `subscriptionId` | `string` | 按订阅 ID 取消单个订阅 | ✅ | — |
+| `UnsubscribeBatchAsync` | `addresses` | `IEnumerable<string>` | 批量按地址取消订阅 | ✅ | — |
+| `UnsubscribeBatchByIdAsync` | `subscriptionIds` | `IEnumerable<string>` | 批量按 ID 取消订阅 | ✅ | — |
+| `GetSubscriptions` | — | — | 返回当前已注册的所有订阅信息 | — | — |
+| `GetStatistics` | `scanRateMs` | `int` | 扫描周期（毫秒） | ✅ | — |
+|  | `scanMode` | `UniconScanMode` | 扫描模式（ExceptionBased / Polled） | ✅ | — |
+
+## 驱动属性 (Properties)
+
+| 属性名 | 类型 | 说明 |
+|--------|------|------|
+| `DriverId` | `string` | 驱动唯一标识 |
+| `State` | `DriverState` | 当前状态：`Disconnected` / `Connecting` / `Connected` / `Faulted` |
+| `IsConnected` | `bool` | 是否处于 `Connected` 状态 |
+| `StateChanged` | `event` | 状态变更事件（`DriverStateChangedEventArgs`） |
+
+## 返回值 (Returns)
+
+| 方法 | 类型 | 说明 |
+|------|------|------|
+| `ConnectAsync` | `Task<bool>` | 连接成功返回 `true`，失败抛异常或返回 `false` |
+| `DisconnectAsync` | `Task` | 完成断开操作 |
+| `PingAsync` | `Task<bool>` | 连通性检测，`true` 表示存活 |
+| `ReadAsync<T>` | `Task<UniconResponse<T>>` | 读取结果，`response.Success` 为 true 时 `response.Data` 携带值与质量戳 |
+| `WriteAsync<T>` | `Task<UniconResponse<bool>>` | 写入成功返回 `true` |
+| `ReadBatchAsync` | `Task<IEnumerable<UniconResponse<object>>>` | 每个请求的读取结果集合 |
+| `WriteBatchAsync` | `Task<IEnumerable<UniconResponse<bool>>>` | 每个写入请求的执行结果 |
+| `SubscribeAsync` / `SubscribeBatchAsync` | `Task<string>` | 成功注册返回唯一订阅 ID |
+| `Unsubscribe*` 系列 | `Task` | 完成取消操作 |
+| `GetSubscriptions` | `IEnumerable<UniconSubscription>` | 当前活跃订阅列表 |
+| `GetStatistics` | `ScanStatistics?` | 返回指定扫描组的统计信息（次数、错误率等） |
+
+## 使用示例 (Examples)
+
+### 示例 1：业务服务中读取单个 Tag 值
+
+```csharp
+public class PlcService
+{
+    private readonly IDriverRegistry _driverRegistry;
+
+    public PlcService(IDriverRegistry driverRegistry)
+    {
+        _driverRegistry = driverRegistry;
+    }
+
+    public async Task<float?> ReadTemperatureAsync(string driverId, string address)
+    {
+        var driver = _driverRegistry.Get(driverId)
+            ?? throw new InvalidOperationException($"Driver {driverId} not found");
+
+        var response = await driver.ReadAsync<float>(new UniconRequest { Address = address });
+
+        if (response.Success && response.Data != null)
+        {
+            Console.WriteLine($"质量: {response.Data.Quality}, 时间: {response.Data.ServerTimestamp}");
+            return response.Data.Value;
+        }
+
+        return null;
+    }
+}
+```
+
+### 示例 2：结构化订阅并处理回调
+
+```csharp
+var driver = _driverRegistry.Get("PLC_01")
+    ?? throw new InvalidOperationException("Driver not found");
+
+string subId = await driver.SubscribeAsync(new UniconSubscription
+{
+    Address    = "DB1.DBD0",
+    ScanRateMs = 500,
+    ScanMode   = UniconScanMode.ExceptionBased,
+    Metadata   = new TagMetadata { Deadband = 0.5, Unit = "℃" },
+    Callback   = async value =>
+    {
+        Console.WriteLine($"温度: {value.Value} ℃ [{value.Quality}]");
+        await Task.CompletedTask;
+    }
+});
+
+// 按 ID 精准取消
+await driver.UnsubscribeByIdAsync(subId);
+```
+
+***
+
+> **更新记录**：文档已同步至 `src/UniCon.Core/IUniconDriver.cs`（v2.3），修正构造函数签名（新增 `INetworkMonitor`），修正 `response.Data?.Value` 访问方式，补充属性说明表。
+
+---
+
+---
+url: /docs/kjc510r9/index.md
+---
+# OPC UA 驱动 (OPC UA Driver)
+
+## 概述 (Overview)
+
+OPC UA (Client/Server) 驱动实现了经典的工业集成标准 OPC 统一架构通讯。本驱动支持作为客户端直接连接 OPC UA 服务器（如 Kepware, Siemens OPC UA Server 等）。底层利用 `Workstation.UaClient` 建立高吞吐量的 Session Channel 信道，提供类型安全的节点读取与写入操作。
+
+***
+
+## 使用方法 (Usage)
+
+通过 `OpcUaDriver` 实例传入符合标准协议格式的 Endpoint 终端地址（经典模式）或 Key-Value 安全参数组合连接字符串（安全增强模式）进行连接。
+
+### 1. 经典兼容模式 (无加密 / 匿名)
+
+```csharp
+await opcuaDriver.ConnectAsync("opc.tcp://192.168.1.150:4840");
+```
+
+### 2. 安全增强模式 (账户密码 / 安全策略 / 证书认证)
+
+```csharp
+// Semicolon-separated Key-Value connection string
+string connStr = "EndpointURL=opc.tcp://192.168.1.150:4840;Anonymous=false;Username=admin;Password=secret_pwd;SecurityPolicy=Basic256Sha256;IsSecurityPolicy=true;AppName=MyCustomGatewayClient";
+await opcuaDriver.ConnectAsync(connStr);
+```
+
+***
+
+## 参数说明 (Parameters)
+
+### 连接字符串参数 (ConnectionString Options)
+
+在**安全增强模式**下，连接字符串采用以分号 `;` 分割的 `Key=Value` 格式，支持以下高级安全参数：
+
+| 参数键名 (不区分大小写) | 数据类型 | 说明 | 默认值 |
+|-----------------------|---------|------|--------|
+| `EndpointURL` / `Endpoint` | `string` | OPC UA 服务器终端地址 (例如 `opc.tcp://127.0.0.1:4840`) | 无 (必填) |
+| `Anonymous` / `AnonymousIdentity` | `bool` | 是否使用匿名登录身份 | `true` (若配置了用户名密码则自动转为 `false`) |
+| `Username` / `User` | `string` | 用于账户身份认证的用户名 | 空 |
+| `Password` / `Pwd` | `string` | 用于账户身份认证的密码 | 空 |
+| `IsSecurityPolicy` / `SecurityPolicyEnabled` | `bool` | 是否开启安全配置策略。开启后将自动为客户端初始化本地证书存储库并自动生成/加载证书 | `false` |
+| `IsSecurityIdentity` / `CertificateAuth` | `bool` | 是否启用客户端 X.509 证书进行握手身份认证。若启用，则会从 `PkiPath` 路径加载客户端证书与私钥 | `false` |
+| `PkiPath` / `CertificatePath` | `string` | 自定义证书存储与验证库的根目录路径（加载公钥 `own/certs/public.der` 与私钥 `own/private/private.pem`） | `"pki"` |
+| `SecurityPolicy` | `string` | 加密与签名算法通道安全策略。支持: `None`, `Basic128Rsa15`, `Basic256`, `Basic256Sha256` | `SecurityPolicyUris.None` |
+| `ApplicationName` / `AppName` | `string` | 自定义向 OPC 服务器注册汇报的客户端应用标识名称 | `"UniCon Client"` |
+| `ApplicationUri` / `AppUri` | `string` | 自定义向 OPC 服务器注册汇报的客户端全局唯一应用 URI 标识 | `"urn:unicon:client:[GUID]"` |
+
+***
+
+## 返回值 (Returns)
+
+### ReadAsync 返回值
+
+| 类型 | 说明 |
+|------|------|
+| `UniconResponse<T>` | 响应包装器。如果读取成功且服务返回 Status 为 `Good`，则在内部携带变量值与对应质量状态；若读取失败或节点不存在，则带有详细的 OPC 协议层错误码 |
+
+### WriteAsync 返回值
+
+| 类型 | 说明 |
+|------|------|
+| `UniconResponse<bool>` | 响应包装器，若成功写入 PLC 的 OPC UA 节点则返回 `true`，失败则包含状态报错原因 |
+
+***
+
+## 使用示例 (Examples)
+
+**示例 1：使用用户名密码登录并使用 Basic256Sha256 策略建立安全会话**
+
+```csharp
+using UniCon.Core.Models;
+using UniCon.Drivers.OpcUa;
+
+var opcuaDriver = new OpcUaDriver("OPCUA_Sec_01", logger);
+
+// 拼接包含安全校验的 Key-Value 参数
+string connStr = "EndpointURL=opc.tcp://192.168.1.100:4840;Anonymous=false;Username=opcuser;Password=complexpwd123;SecurityPolicy=Basic256Sha256;IsSecurityPolicy=true;AppName=RefineryScannerGateway;AppUri=urn:myfactory:refinery:gateway";
+bool connected = await opcuaDriver.ConnectAsync(connStr);
+
+if (connected)
+{
+    Console.WriteLine("安全会话隧道创建成功！");
+    
+    // 执行高精度的 NodeId 点位读取
+    var req = new UniconRequest { Address = "ns=2;s=Device.Status.Run" };
+    var res = await opcuaDriver.ReadAsync<bool>(req);
+    
+    if (res.Success && res.Data != null)
+    {
+        Console.WriteLine($"点位状态: {res.Data.Value}");
+    }
+}
+```
+
+**示例 2：使用 X.509 客户端证书进行身份认证**
+对于必须采用公私钥对进行高级加密身份检验的场景，将证书资产存放在工作目录下的 `pki` 文件夹：
+
+* 公钥证书路径：`[BaseDir]/pki/own/certs/public.der`
+* 私钥证书路径：`[BaseDir]/pki/own/private/private.pem`
+
+```csharp
+// 启用客户端证书强校验模式，并指定自定义客户端应用标识名
+string connStr = "EndpointURL=opc.tcp://192.168.1.100:4840;IsSecurityPolicy=true;CertificateAuth=true;PkiPath=pki;SecurityPolicy=Basic256Sha256;AppName=SecurityAuditClient;AppUri=urn:unicon:security:audit";
+await opcuaDriver.ConnectAsync(connStr);
+```
+
+---
+
+---
+url: /docs/memorycacheprovider/index.md
+---
+# MemoryCacheProvider
+
+## 概述 (Overview)
+
+`MemoryCacheProvider` 是 UniCon 框架的内存缓存实现，遵循 `IUniconCacheProvider` 接口。它基于 .NET `ConcurrentDictionary` 提供线程安全的高并发读写，适用于轻量级本地缓存场景。
+
+## 使用方法 (Usage)
+
+在依赖注入阶段注册缓存提供者：
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+// 注册内存缓存实现
+builder.Services.AddSingleton<IUniconCacheProvider, MemoryCacheProvider>();
+```
+
+> **注意**：如果同时注册了 `RedisCacheProviderPlaceholder`，`MemoryCacheProvider` 将作为默认实现使用，优先级更高。
+
+## 参数说明 (Parameters)
+
+> **MemoryCacheProvider** 本身不接受外部配置参数，所有行为均通过代码实现。
+
+## 返回值 (Returns)
+
+| 类型 | 说明 |
+|------|------|
+| `IUniconCacheProvider` | 已注册的缓存提供者实例 |
+
+## 使用示例 (Examples)
+
+```csharp
+public class CacheService
+{
+    private readonly IUniconCacheProvider _cacheProvider;
+    public CacheService(IUniconCacheProvider cacheProvider)
+    {
+        _cacheProvider = cacheProvider;
+    }
+
+    public async Task<DataValue<object>?> GetDriverCacheAsync(string driverId, string address)
+    {
+        return await _cacheProvider.GetAsync(driverId, address);
+    }
+
+    public async Task SetDriverCacheAsync(string driverId, string address, DataValue<object> value)
+    {
+        await _cacheProvider.SetAsync(driverId, address, value);
+    }
+
+    public async Task RemoveDriverCacheAsync(string driverId, string address)
+    {
+        await _cacheProvider.RemoveAsync(driverId, address);
+    }
+}
+```
+
+***
+
+> **更新记录**：文档已同步至 `src/UniCon.Core/Caching/MemoryCacheProvider.cs`（v2.3），确保方法签名与示例代码保持一致。
+
+---
+
+---
+url: /docs/muvzzdpy/index.md
+---
+# Siemens S7 驱动 (Siemens S7 Driver)
+
+## 概述 (Overview)
+
+西门子 S7 驱动实现了基于以太网（ISO-on-TCP）对西门子全系列 PLC（S7-200 Smart、S7-300、S7-400、S7-1200、S7-1500）的直连通讯。底层基于 `S7.Net` 构建，支持 DB 块、M 区、I/Q 区等多种寄存器类型读写与批量合并操作。
+
+> **注意**：S7 PDU 限制最大 240 字节，`ReadBatchAsync` 每批次安全上限为 19 个数据项（`S7Driver` 已内置自动分批逻辑）。
+
+## 使用方法 (Usage)
+
+在 ASP.NET Core 项目中，推荐通过 `IDriverRegistry` 工厂方法创建（DI 自动装配全部依赖）：
+
+```csharp
+// 通过别名工厂创建（推荐，DI 自动装配 ILogger, IUniconCacheProvider, INetworkMonitor）
+var driver = _driverRegistry.CreateDriver("S7", "PLC_Line1");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(driver, "CpuType=S71200;Ip=192.168.0.10;Rack=0;Slot=1");
+```
+
+## 参数说明 (Parameters)
+
+### 连接字符串参数
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| CpuType | `string` | PLC CPU 类型：`S7200`、`S7300`、`S7400`、`S71200`、`S71500` | 是 | 无 |
+| Ip | `string` | PLC 的 IP 地址 | 是 | 无 |
+| Rack | `short` | PLC 的机架号 (Rack) | 否 | `0` |
+| Slot | `short` | PLC 的插槽号 (Slot) | 否 | `1` |
+| ReadTimeout | `int` | 读取超时时间（毫秒） | 否 | `3000` |
+| WriteTimeout | `int` | 写入超时时间（毫秒） | 否 | `3000` |
+
+### 地址格式 (Address)
+
+| 格式 | 示例 | 说明 |
+|------|------|------|
+| DB 块浮点 | `DB1.DBD0` | DB1 第 0 字节开始的双字（32 位浮点） |
+| DB 块整数 | `DB1.DBW4` | DB1 第 4 字节的字（16 位整数） |
+| DB 块位 | `DB1.DBX8.0` | DB1 第 8 字节第 0 位（布尔） |
+| M 区字节 | `MB0` | M 区第 0 字节 |
+| M 区位 | `M0.0` | M 区第 0 字节第 0 位 |
+| 输入 | `I0.0` | 数字输入第 0 位 |
+| 输出 | `Q0.0` | 数字输出第 0 位 |
+
+### 读写方法参数
+
+| 参数名 | 类型 | 说明 | 是否必填 |
+|--------|------|------|----------|
+| Address | `string` | S7 寄存器绝对地址 | 是 |
+| value | `T` | 写入的具体值（仅 `WriteAsync` 需要） | 是 |
+
+## 返回值 (Returns)
+
+| 方法 | 返回类型 | 说明 |
+|------|----------|------|
+| `ReadAsync<T>` | `UniconResponse<T>` | `response.Success` 为 true 时，`response.Data.Value` 携带值，`response.Data.Quality` 携带质量码 |
+| `WriteAsync<T>` | `UniconResponse<bool>` | `true` 成功，`false` 包含错误信息 |
+| `ReadBatchAsync` | `IEnumerable<UniconResponse<object>>` | 每批最多 19 个地址，自动按 PDU 限制分批 |
+| `SubscribeAsync` | `Task<string>` | 返回订阅分配的 GUID 标识 |
+
+## 使用示例 (Examples)
+
+**示例 1：读取 S7-1200 实数**
+
+```csharp
+// 通过 DI 工厂创建驱动
+var driver = _driverRegistry.CreateDriver("S7", "Line1_PLC");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(driver, "CpuType=S71200;Ip=192.168.0.10;Rack=0;Slot=1");
+
+var req = new UniconRequest { Address = "DB1.DBD0" };
+var res = await driver.ReadAsync<float>(req);
+
+if (res.Success && res.Data != null)
+{
+    Console.WriteLine($"温度值: {res.Data.Value} °C, 质量: {res.Data.Quality}");
+    Console.WriteLine($"PLC 时间: {res.Data.SourceTimestamp}, 网关时间: {res.Data.ServerTimestamp}");
+}
+```
+
+**示例 2：批量读取（自动合并连续地址）**
+
+```csharp
+var requests = new List<UniconRequest>
+{
+    new() { Address = "DB1.DBD0" },   // 温度
+    new() { Address = "DB1.DBD4" },   // 压力
+    new() { Address = "DB1.DBX8.0" }, // 运行状态位
+    new() { Address = "DB1.DBW10" }   // 产品计数
+};
+
+var results = await driver.ReadBatchAsync(requests);
+foreach (var r in results)
+{
+    Console.WriteLine(r.Success ? $"值: {r.Data?.Value}" : $"错误: {r.Message}");
+}
+```
+
+**示例 3：后台订阅（v2 ExceptionBased 模式，含死区）**
+
+```csharp
+await driver.SubscribeAsync(new UniconSubscription
+{
+    Address    = "DB1.DBD0",
+    ScanRateMs = 500,
+    ScanMode   = UniconScanMode.ExceptionBased,
+    Metadata   = new TagMetadata { Unit = "℃", Deadband = 0.5 },
+    Callback   = async dv =>
+    {
+        Console.WriteLine($"[{dv.ServerTimestamp:HH:mm:ss.fff}] 温度变化: {dv.Value} ℃");
+        await Task.CompletedTask;
+    }
+});
+```
+
+**示例 4：写入 PLC 地址**
+
+```csharp
+var writeReq = new UniconRequest { Address = "DB1.DBX8.0" };
+var writeRes = await driver.WriteAsync<bool>(writeReq, true);
+Console.WriteLine(writeRes.Success ? "启动指令下发成功" : $"写入失败: {writeRes.Message}");
+```
+
+---
+
+---
+url: /docs/p5uyhklb/index.md
+---
+# Driver Architecture v2 — 扫描调度引擎
+
+## 概述 (Overview)
+
+v2.3 对 `DriverBase` 实现了职责拆分与精简协调层，核心组件包括：
+
+| 组件 | 职责 |
+|------|------|
+| `DriverBase` | 轻量协调层：连接、Watchdog、状态管理 |
+| `IConnectionManager` | 连接/断开、Watchdog 拉起、物理句柄托管 |
+| `INetworkMonitor` | 全局网络可达性监测（断网挂起、上线唤醒） |
+| `ScanGroupRegistry` | 订阅注册时完成地址去重与分组 |
+| `ScanScheduler` | 基于最小等待时间调度到期 ScanGroup |
+| `NotificationDispatcher` | `Channel<T>` 异步分发，回调隔离 |
+| `IUniconCacheProvider` | DI 注入缓存，非 static |
+| `IScanStrategy` | 策略模式：`ExceptionBased`（死区支持）与 `Polled` |
+
+***
+
+## 数据流
+
+```
+Subscribe(address, callback)
+    │
+    ▼
+ScanGroupRegistry.GetOrCreate(rate, mode)
+    │  注册时完成地址去重
+    ▼
+TagEntry.AddSubscriber(id, callback)
+
+─────────────────────────────────────────
+
+ScanScheduler（独立线程）
+    │  最小等待时间调度
+    ├─► 找到到期 ScanGroup
+    │       │
+    │       ▼
+    │   Driver.ReadBatchAsync(addresses)  ← 真实批量读取
+    │       │
+    │       ▼
+    │   IScanStrategy.ShouldNotify?  ← ExceptionBased / Polled
+    │       │  yes
+    │       ▼
+    │   TagEntry.UpdateCache(value)
+    │   CacheProvider.SetAsync(fire-and-forget)
+    │       │
+    │       ▼
+    │   NotificationDispatcher.TryEnqueue(envelope)
+
+─────────────────────────────────────────
+
+NotificationDispatcher（独立消费线程）
+    │  Channel<NotificationEnvelope>
+    ▼
+await envelope.Callback(value)  ← 异常隔离，不影响扫描线程
+```
+
+***
+
+## 使用方法 (Usage)
+
+### 注册订阅
+
+```csharp
+// 简写（async Func callback）
+var subId = await driver.SubscribeAsync("DB1.DBD0", async value =>
+{
+    Console.WriteLine($"New value: {value.Value} [{value.Quality}]");
+    await Task.CompletedTask;
+});
+
+// 结构化订阅（含元数据与死区）
+var subId = await driver.SubscribeAsync(new UniconSubscription
+{
+    Address    = "DB1.DBD0",
+    ScanRateMs = 500,
+    ScanMode   = UniconScanMode.ExceptionBased,
+    Metadata   = new TagMetadata { Deadband = 0.5, Unit = "℃" },
+    Callback   = async value => { /* ... */ }
+});
+```
+
+### 取消订阅
+
+```csharp
+await driver.UnsubscribeByIdAsync(subId);
+// 或按地址取消所有订阅
+await driver.UnsubscribeAsync("DB1.DBD0");
+```
+
+### 查询统计
+
+```csharp
+var stats = driver.GetStatistics(500, UniconScanMode.ExceptionBased);
+Console.WriteLine($"扫描次数: {stats?.ScanCount}, 通知次数: {stats?.NotifyCount}");
+Console.WriteLine($"平均读取: {stats?.AverageReadDurationMs:F1}ms, 错误率: {stats?.ErrorRate:P1}");
+```
+
+### 监听状态变更
+
+```csharp
+driver.StateChanged += (_, e) =>
+{
+    Console.WriteLine($"[{e.DriverId}] {e.OldState} → {e.NewState}");
+};
+```
+
+***
+
+## 参数说明 (Parameters)
+
+### UniconSubscription
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| `Address` | `string` | 寄存器地址，如 `"DB1.DBD0"` | 必填 |
+| `ScanRateMs` | `int` | 轮询周期（毫秒） | `1000` |
+| `ScanMode` | `UniconScanMode` | `ExceptionBased` / `Polled` | `ExceptionBased` |
+| `Callback` | `Func<DataValue<object>, Task>` | 异步通知回调 | 必填 |
+| `MaxQueueLength` | `int` | 通知队列最大长度 | `128` |
+| `OverflowPolicy` | `OverflowPolicy` | `DropOldest` / `DropNewest` | `DropOldest` |
+| `Metadata` | `TagMetadata?` | 死区/单位/类型元数据 | `null` |
+
+### TagMetadata
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `Deadband` | `double` | 数值变化死区（工程单位），`ExceptionBased` 模式生效 |
+| `Unit` | `string` | 工程单位，如 `"℃"` |
+| `DataType` | `UniconDataType` | 期望的数据类型 |
+| `ScalingFactor` | `double` | 线性缩放系数 |
+| `AccessMode` | `TagAccessMode` | `ReadOnly` / `WriteOnly` / `ReadWrite` |
+
+***
+
+## 实现自定义 Driver (Examples)
+
+继承 `DriverBase`，构造函数中必须传入并透传 `INetworkMonitor`（**v2.2 新增必填依赖**）：
+
+```csharp
+using UniCon.Core;
+using UniCon.Core.Caching;
+using UniCon.Core.Models;
+using UniCon.Core.Network;
+using Microsoft.Extensions.Logging;
+
+[UniconDriver("MyPlc")]  // 注册别名，DiscoverAndRegisterDrivers() 自动发现
+public class MyPlcDriver : DriverBase
+{
+    private MyPhysicalClient? _physicalClient;
+
+    // 必须接收并透传所有 4 个依赖
+    public MyPlcDriver(string driverId, ILogger logger,
+        IUniconCacheProvider cacheProvider, INetworkMonitor networkMonitor)
+        : base(driverId, logger, cacheProvider, networkMonitor) { }
+
+    protected override async Task<bool> OnConnectAsync(string connectionString, CancellationToken ct)
+    {
+        // 建立物理连接
+        _physicalClient = new MyPhysicalClient(connectionString);
+        await _physicalClient.ConnectAsync(ct);
+        return _physicalClient.IsConnected;
+    }
+
+    protected override async Task OnDisconnectAsync(CancellationToken ct)
+    {
+        // 关闭物理连接
+        if (_physicalClient != null)
+            await _physicalClient.DisconnectAsync(ct);
+    }
+
+    protected override async Task<UniconResponse<T>> InternalReadAsync<T>(UniconRequest request, CancellationToken ct)
+    {
+        // 单点读取（由 DriverBase 默认 ReadBatchAsync 循环调用）
+        var raw = await _physicalClient!.ReadAsync(request.Address, ct);
+        return UniconResponse<T>.CreateSuccess((T)Convert.ChangeType(raw, typeof(T)));
+    }
+
+    protected override async Task<UniconResponse<bool>> InternalWriteAsync<T>(UniconRequest request, T value, CancellationToken ct)
+    {
+        await _physicalClient!.WriteAsync(request.Address, value, ct);
+        return UniconResponse<bool>.CreateSuccess(true);
+    }
+
+    /// <summary>
+    /// 覆盖以提供真实批量读取（地址块合并），替代 DriverBase 的 foreach 兜底
+    /// </summary>
+    public override async Task<IEnumerable<UniconResponse<object>>> ReadBatchAsync(
+        IEnumerable<UniconRequest> requests, CancellationToken ct = default)
+    {
+        // 实现地址块合并，一次 IO 读取多个连续地址
+        var results = new List<UniconResponse<object>>();
+        // ... 合并逻辑 ...
+        return results;
+    }
+
+    public override void Dispose()
+    {
+        _physicalClient?.Dispose();
+        base.Dispose(); // 必须调用：释放调度器、退订网络事件
+    }
+}
+```
+
+***
+
+## 关键设计决策
+
+### 为什么移除全局 `_syncLock`？
+
+原有 `SemaphoreSlim(1,1)` 对所有 Read/Write 串行化，阻止并发读。新架构锁下沉到 `ITransport` 层，由各协议实现决定并发策略（如 S7.Net 本身已内置线程安全）。
+
+### 为什么 `ScanMode` 改为策略模式？
+
+`if (ScanMode == ExceptionBased)` 分支散落在扫描循环中，每添加新模式（如 Deadband、Sampling）都需修改核心调度逻辑。`IScanStrategy` 将判断逻辑封装为可替换对象，新模式无需修改 Scheduler。
+
+### 为什么用 `Channel<T>` 而非直接 `await callback()`？
+
+直接 `await` 回调会让用户代码阻塞扫描线程。`Channel<T>` 将采集与通知完全解耦：
+
+* 扫描线程只做 `TryWrite`（非阻塞）
+* 独立消费线程异步 `await callback()`
+* 单个回调异常不影响后续通知消费
+
+### 为什么 LastPolledTime 从 Subscription 迁移到 ScanGroup？
+
+同一 ScanGroup 内所有 Tag 同批次读取，共享同一个调度周期。每个 Subscription 持有独立的 LastPolledTime 会导致同组 Tag 在不同时刻各自触发，产生多次不必要的 IO。
+
+### 为什么构造函数新增 `INetworkMonitor`？
+
+`INetworkMonitor` 提供全局网络状态（Ping/TCP）监测，当整个网络不可达时，Watchdog 自动挂起重连循环，避免无效的 CPU 消耗和 TCP 握手风暴。网络恢复后，所有挂起的 Watchdog 同时被唤醒并在毫秒级内完成驱动自愈。
+
+---
+
+---
+url: /docs/rediscacheproviderplaceholder/index.md
+---
+# RedisCacheProviderPlaceholder
+
+## 概述 (Overview)
+
+`RedisCacheProviderPlaceholder` 是 UniCon 框架在未集成正式 Redis 缓存时提供的占位实现，满足 `IUniconCacheProvider` 接口的编译要求。其内部基于 `ConcurrentDictionary` 提供线程安全的本地内存存储，与内置的 `MemoryCacheProvider` 功能相同，不提供真正的分布式缓存能力。
+
+其主要用途是：**在尚未引用 Redis 相关库时，作为过渡期占位，保持代码编译通过**，后续平滑替换为真实 Redis 实现。
+
+> **注意**：框架已通过 `AddUniCon()` 默认注册了 `MemoryCacheProvider`。若无分布式缓存需求，直接使用 `AddUniCon()` 即可，无需引用本占位实现。
+
+## 使用方法 (Usage)
+
+在依赖注入阶段手动替换缓存提供者：
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+// 方式一：使用内置 MemoryCacheProvider（包含在 AddUniCon() 中，无需额外注册）
+builder.Services.AddUniCon();
+
+// 方式二：手动注册 RedisCacheProviderPlaceholder（替换占位实现）
+// 注意：这会覆盖 AddUniCon() 中注册的 MemoryCacheProvider
+builder.Services.AddSingleton<IUniconCacheProvider, RedisCacheProviderPlaceholder>();
+```
+
+## 参数说明 (Parameters)
+
+`RedisCacheProviderPlaceholder` 本身不接受外部配置参数，所有行为通过内部 `ConcurrentDictionary` 实现。
+
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| — | — | 无配置参数 | — | — |
+
+## 返回值 (Returns)
+
+| 接口方法 | 返回类型 | 说明 |
+|----------|----------|------|
+| `GetAsync` | `Task<DataValue<object>?>` | 返回缓存中的最新数据值，不存在时返回 `null` |
+| `SetAsync` | `Task` | 将数据值写入缓存 |
+| `RemoveAsync` | `Task` | 从缓存中删除指定条目 |
+
+## 使用示例 (Examples)
+
+**示例 1：接入真实 Redis 的推荐迁移路径**
+
+当项目准备接入 Redis 时，实现 `IUniconCacheProvider` 并注册替换即可，无需修改任何业务代码：
+
+```csharp
+using StackExchange.Redis;
+using System.Text.Json;
+using UniCon.Core.Caching;
+using UniCon.Core.Models;
+
+public class RedisCacheProvider : IUniconCacheProvider
+{
+    private readonly IDatabase _db;
+
+    public RedisCacheProvider(IConnectionMultiplexer redis)
+        => _db = redis.GetDatabase();
+
+    public async Task<DataValue<object>?> GetAsync(string driverId, string address, CancellationToken ct = default)
+    {
+        var json = await _db.StringGetAsync($"unicon:{driverId}:{address}");
+        return json.HasValue
+            ? JsonSerializer.Deserialize<DataValue<object>>(json!)
+            : null;
+    }
+
+    public async Task SetAsync(string driverId, string address, DataValue<object> dataValue, CancellationToken ct = default)
+    {
+        var json = JsonSerializer.Serialize(dataValue);
+        await _db.StringSetAsync($"unicon:{driverId}:{address}", json, TimeSpan.FromMinutes(10));
+    }
+
+    public async Task RemoveAsync(string driverId, string address, CancellationToken ct = default)
+        => await _db.KeyDeleteAsync($"unicon:{driverId}:{address}");
+}
+```
+
+在 `Program.cs` 中替换注册：
+
+```csharp
+// 注册 Redis 连接
+builder.Services.AddSingleton<IConnectionMultiplexer>(
+    ConnectionMultiplexer.Connect("localhost:6379"));
+
+// 替换内置 MemoryCacheProvider（必须在 AddUniCon() 之后调用以覆盖）
+builder.Services.AddUniCon();
+builder.Services.AddSingleton<IUniconCacheProvider, RedisCacheProvider>();
+```
+
+**示例 2：通过接口使用缓存（业务层无感知切换）**
+
+```csharp
+public class CacheQueryService
+{
+    private readonly IUniconCacheProvider _cacheProvider;
+
+    public CacheQueryService(IUniconCacheProvider cacheProvider)
+    {
+        _cacheProvider = cacheProvider;
+    }
+
+    public async Task<DataValue<object>?> GetCachedValueAsync(string driverId, string address)
+    {
+        return await _cacheProvider.GetAsync(driverId, address);
+    }
+}
+```
+
+***
+
+> **更新记录**：修正文档中不存在的 `AddRedisCacheProviderPlaceholder()` 扩展方法描述，明确占位实现的使用场景与 Redis 迁移路径。
+
+---
+
+---
+url: /docs/s6oz5ory/index.md
+---
+# 通讯驱动 (Communication Drivers)
+
+## 概述
+
+Drivers 模块包含对各种工业通讯协议的具体实现。所有驱动均继承自 `DriverBase` 并受 `IDriverRegistry` 统一管理。通过全局网络状态监控与自愈 Watchdog，本系统可在复杂工业网络环境中提供极佳的连通稳定性。
+
+## 已集成协议
+
+* **Siemens S7**: 针对西门子系列 PLC 的优化直连驱动。
+* **Modbus TCP**: 标准 Modbus 寄存器网络访问。
+* **OPC UA**: 工业级 OPC UA Client，支持证书与安全策略。
+* **MQTT**: 基于 Pub/Sub 模式的轻量级工业 IoT 消息驱动。
+* **OPC UA PubSub**: 高速 UDP/MQTT 发布订阅驱动，支持 UADP/JSON 解码。
+
+## 驱动架构与约定 (v2.2)
+
+* **构造函数注入**: 必须在构造函数中接收并调用 `base(driverId, logger, cacheProvider, networkMonitor)` 注入 `IUniconCacheProvider` 与 `INetworkMonitor`。
+* **状态与连接自愈**: 通过实现 `OnConnectAsync` 和 `OnDisconnectAsync`，基类自愈 Watchdog 会根据网络健康状态与物理/通道异常，在毫秒级内自动响应网络切换或掉线事件。
+  * **断网挂起**: 当系统网络完全中断时，Watchdog 重连线程会自动挂起，消除无效的 CPU 与网络重试开销。
+  * **恢复自愈**: 当系统网络重新上线时，Watchdog 会瞬间被唤醒并在毫秒级内自动触发全量驱动的恢复连接。
+* **物理与协议异常监控**:
+  * 对于 OPC UA、MQTT、OPC UA PubSub，驱动监听底层通道的 `Faulted`/`Closed`/`Disconnected` 事件，即时流转状态为 `Faulted`。
+  * 对于 S7、Modbus，驱动在 I/O 读写捕获异常或 socket 中断时，瞬时触发 Faulted 流转。
+* **传输层锁机制**: 驱动需要在 `ITransport` 层（或类似物理连接层）自行处理读写线程安全，不再依赖全局读写锁，从而支持异步高并发读。
+* **标准销毁**: 覆盖 `Dispose()` 时必须调用 `base.Dispose()` 释放调度器、退订网络事件以防止内存泄漏。
+
+---
+
+---
+url: /docs/tmpzgjr3/index.md
+---
+# OPC UA PubSub 驱动 (OPC UA PubSub Driver)
+
+## 概述 (Overview)
+
+本驱动实现了 OPC UA Part 14 规范定义的发布-订阅 (PubSub) 模型通讯。与传统的 Request/Response 模式（如 S7、Modbus）不同，PubSub 提供极低延迟的单向高速数据流传输，特别适合工厂级别的软实时与硬实时通讯。
+
+支持双栈接入：
+
+1. **UADP over UDP 多播**：通过 `UadpPubSubDecoder` 动态解包高频多播网络数据，自动映射质量属性与高精度源时间戳。
+2. **JSON/Binary over MQTT**：支持标准自描述 JSON Payload，通过 `?encoding=binary` 参数强制切换 UADP 二进制解析。
+
+**重要限制**：PubSub 为单向数据流，**不支持 `ReadAsync`、`WriteAsync`、`ReadBatchAsync`、`WriteBatchAsync`**，调用时抛出 `NotSupportedException`。仅通过 `SubscribeAsync` / `UnsubscribeAsync` 接收数据。
+
+底层传输层通过 `IPubSubTransport.ConnectionLost` 事件感知连接中断，由 `DriverBase` Watchdog 自动处理重连。
+
+## 使用方法 (Usage)
+
+通过 `IDriverRegistry` 工厂方法创建（推荐，DI 自动装配依赖）：
+
+```csharp
+// UDP 组播
+var driver = _driverRegistry.CreateDriver("OpcUaPubSub", "PubSub_UDP");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(driver, "opc.udp://224.0.2.14:4840");
+```
+
+驱动根据连接字符串的协议头自动选择传输组件与解码器：
+
+* `opc.udp://` → `UdpPubSubTransport` + `UadpPubSubDecoder`（二进制）
+* `mqtt://` + 无 `encoding=binary` → `MqttPubSubTransport` + `JsonPubSubDecoder`（JSON）
+* `mqtt://` + `?encoding=binary` → `MqttPubSubTransport` + `UadpPubSubDecoder`（二进制）
+
+## 参数说明 (Parameters)
+
+### 连接字符串 (ConnectionString / URI)
+
+| 格式 | 示例 | 说明 |
+|------|------|------|
+| UDP 组播 | `opc.udp://224.0.2.14:4840` | 加入 UDP 多播组 |
+| MQTT JSON | `mqtt://192.168.1.100:1883/factory/line1` | 订阅 MQTT Topic，JSON 解码 |
+| MQTT 二进制 | `mqtt://192.168.1.100:1883/factory/line1?encoding=binary` | 订阅 MQTT Topic，UADP 二进制解码 |
+
+### 订阅地址 (SubscribeAsync address)
+
+地址对应 PubSub 解码后的**数据集字段名称**（Dataset Field Name），由 Publisher 方在 UADP/JSON 消息中定义，如 `"Temperature"`、`"MotorSpeed"`。
+
+## 返回值 (Returns)
+
+| 接口方法 | 返回值 | 说明 |
+|----------|--------|------|
+| `SubscribeAsync` | `Task<string>` | 返回 address（字段名）作为订阅 ID |
+| `UnsubscribeAsync` | `Task` | 移除对该字段名的订阅 |
+| `PingAsync` | `Task<bool>` | 若 Transport 非 null（已连接）返回 `true` |
+| `ReadAsync` | — | **不支持**，抛出 `NotSupportedException` |
+| `WriteAsync` | — | **不支持**，抛出 `NotSupportedException` |
+
+订阅回调接收到的数据：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `Value` | `object?` | 解码后的实际数值 |
+| `Status` | `DataStatus` | `Good` / `Bad` / `Uncertain` |
+| `SourceTimestamp` | `DateTime` | 数据在 Publisher 端产生的时间戳 |
+| `ServerTimestamp` | `DateTime` | 网关接收到数据的时间戳 |
+
+## 使用示例 (Examples)
+
+**示例 1：UDP UADP 多播订阅**
+
+```csharp
+var driver = _driverRegistry.CreateDriver("OpcUaPubSub", "PubSub_UDP");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(driver, "opc.udp://224.0.2.14:4840");
+
+// address 为 Publisher 发布的数据集字段名
+await driver.SubscribeAsync("Temperature", async data =>
+{
+    Console.WriteLine($"[UDP UADP] 温度: {data.Value}, 质量: {data.Status}, 源时间: {data.SourceTimestamp}");
+    await Task.CompletedTask;
+});
+```
+
+**示例 2：MQTT UADP 二进制订阅（强制二进制解码）**
+
+```csharp
+var driver = _driverRegistry.CreateDriver("OpcUaPubSub", "PubSub_MQTT_Binary");
+_driverRegistry.Register(driver);
+
+// 附加 ?encoding=binary 强制使用 UadpPubSubDecoder
+await _connectionManager.RegisterDriverAsync(
+    driver,
+    "mqtt://192.168.1.100:1883/factory/line1/uadp?encoding=binary"
+);
+
+await driver.SubscribeAsync("MotorSpeed", async data =>
+{
+    Console.WriteLine($"[MQTT UADP] 转速: {data.Value} RPM, 质量: {data.Status}");
+    await Task.CompletedTask;
+});
+```
+
+**示例 3：MQTT JSON 格式订阅（默认 JSON 解码）**
+
+```csharp
+var driver = _driverRegistry.CreateDriver("OpcUaPubSub", "PubSub_MQTT_JSON");
+_driverRegistry.Register(driver);
+await _connectionManager.RegisterDriverAsync(driver, "mqtt://192.168.0.100:1883/factory/line1/json");
+
+await driver.SubscribeAsync("Current", async data =>
+{
+    Console.WriteLine($"[MQTT JSON] 电流: {data.Value} A, 接收质量: {data.Status}");
+    await Task.CompletedTask;
+});
+```
+
+**示例 4：使用 ConnectionStringBuilder 生成连接串**
+
+```csharp
+using UniCon.Core.Helpers;
+
+string connStr = ConnectionStringBuilder.OpcUaPubSub()
+    .WithScheme(PubSubScheme.Udp)
+    .WithHost("224.0.2.14")
+    .WithPort(4840)
+    .Build();
+// 输出: opc.udp://224.0.2.14:4840
+```
+
+---
+
+---
+url: /docs/wgrovxsn/index.md
+---
+# 统一主动轮询订阅引擎 (Active Polling Subscription Engine v2)
+
+## 概述 (Overview)
+
+对于 S7、Modbus 等不具备主动上报能力的南向协议，UniCon v2 在 `UniCon.Core` 层实现了完整重构的主动采集订阅引擎。
+
+### 核心架构改进（v2 vs v1）
+
+| 能力 | v1 旧版 | v2 当前版 |
+|------|---------|-----------|
+| 调度方式 | `while(true)+Delay(50)` 全量扫描 | 最小等待时间调度，仅调度到期 ScanGroup |
+| 地址去重 | 运行时 `GroupBy(address)` | 注册阶段 `ScanGroupRegistry` 预分组 |
+| Callback 执行 | 扫描线程同步调用 | `Channel<T>` 投递，独立线程异步消费 |
+| 缓存比对 | 在 Subscription 层 | 在 `TagEntry`（Tag 层）|
+| 扫描模式扩展 | `if/else` 硬编码 | `IScanStrategy` 策略模式 |
+| CacheProvider | `static` 全局赋值 | 构造函数 DI 注入 |
+| Callback 签名 | Action\<DataValue\<object>> | Func\<DataValue\<object>, Task>（异步）|
+
+***
+
+## 使用方法 (Usage)
+
+### 方法 1：极简快捷订阅
+
+```csharp
+// 使用驱动默认扫描周期与 ExceptionBased 模式
+var subId = await driver.SubscribeAsync("DB1.DBD0", async dataValue =>
+{
+    Console.WriteLine($"变更通知: {dataValue.Value} [{dataValue.Quality}]");
+    await Task.CompletedTask;
+});
+
+// 取消该地址下的所有订阅
+await driver.UnsubscribeAsync("DB1.DBD0");
+```
+
+### 方法 2：结构化精准订阅（推荐）
+
+```csharp
+var subId = await driver.SubscribeAsync(new UniconSubscription
+{
+    Address    = "DB1.DBD0",
+    ScanRateMs = 500,
+    ScanMode   = UniconScanMode.ExceptionBased,
+
+    // 可选：Tag 元数据（死区过滤、单位描述等）
+    Metadata = new TagMetadata
+    {
+        Name     = "反应釜温度",
+        Unit     = "℃",
+        Deadband = 0.5,   // 变化 < 0.5℃ 时不触发通知
+        DataType = UniconDataType.Float
+    },
+
+    // 异步 Func callback，在独立线程中被 NotificationDispatcher await
+    Callback = async dataValue =>
+    {
+        Console.WriteLine($"[{dataValue.ServerTimestamp:HH:mm:ss.fff}] 温度: {dataValue.Value} ℃");
+        await _myService.SaveAsync(dataValue);
+    },
+
+    // Backpressure 控制
+    MaxQueueLength = 256,
+    OverflowPolicy = OverflowPolicy.DropOldest
+});
+
+// 按 ID 精准取消
+await driver.UnsubscribeByIdAsync(subId);
+```
+
+### 查询活动订阅
+
+```csharp
+IEnumerable<UniconSubscription> activeSubs = driver.GetSubscriptions();
+```
+
+### 查询扫描统计
+
+```csharp
+var stats = driver.GetStatistics(500, UniconScanMode.ExceptionBased);
+if (stats != null)
+{
+    Console.WriteLine($"扫描次数: {stats.ScanCount}");
+    Console.WriteLine($"通知次数: {stats.NotifyCount}");
+    Console.WriteLine($"平均读取: {stats.AverageReadDurationMs:F1}ms");
+    Console.WriteLine($"错误率:   {stats.ErrorRate:P1}");
+}
+```
+
+### 监听驱动状态变更
+
+```csharp
+driver.StateChanged += (_, e) =>
+{
+    Console.WriteLine($"[{e.DriverId}] {e.OldState} → {e.NewState}");
+};
+```
+
+***
+
+## 参数说明 (Parameters)
+
+### `UniconSubscription` 属性
+
+| 属性名 | 类型 | 说明 | 必填 | 默认值 |
+|--------|------|------|------|--------|
+| `Id` | `string` | 唯一订阅 ID，自动生成 Guid | 否 | 随机 Guid |
+| `Address` | `string` | 寄存器地址，如 `"DB1.DBD0"` | 是 | 无 |
+| `ScanRateMs` | `int` | 轮询周期（毫秒） | 否 | `1000` |
+| `ScanMode` | `UniconScanMode` | `ExceptionBased` / `Polled` | 否 | `ExceptionBased` |
+| `Callback` | Func\<DataValue\<object>, Task> | 异步通知回调 | 是 | 无 |
+| `Metadata` | `TagMetadata?` | Tag 元数据（死区/单位/类型） | 否 | `null` |
+| `MaxQueueLength` | `int` | 通知队列最大容量（Backpressure 控制） | 否 | `128` |
+| `OverflowPolicy` | `OverflowPolicy` | `DropOldest` / `DropNewest` | 否 | `DropOldest` |
+
+### `TagMetadata` 属性
+
+| 属性名 | 类型 | 说明 |
+|--------|------|------|
+| `Deadband` | `double` | 数值变化死区（工程单位），`ExceptionBased` 时生效；`0` 禁用 |
+| `Unit` | `string` | 工程单位，如 `"℃"`、`"bar"` |
+| `DataType` | `UniconDataType` | 期望的数据类型 |
+| `ScalingFactor` / `ScalingOffset` | `double` | 线性缩放：物理值 = Raw × Factor + Offset |
+| `AccessMode` | `TagAccessMode` | `ReadOnly` / `WriteOnly` / `ReadWrite` |
+
+### DataValue\<T> 字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `Value` | `T?` | 实际数据值 |
+| `Status` | `DataStatus` | `Good` / `Bad` / `Uncertain` / `Timeout` |
+| `Quality` | `QualityCode` | OPC UA 兼容质量码（16 位） |
+| `SourceTimestamp` | `DateTime` | 数据在设备端产生的时间（Driver 填充） |
+| `ServerTimestamp` | `DateTime` | 数据到达网关的时间（ScanScheduler 填充） |
+
+***
+
+## 返回值 (Returns)
+
+| 方法 | 返回值 | 说明 |
+|------|--------|------|
+| `SubscribeAsync(UniconSubscription)` | `Task<string>` | 成功后返回订阅 ID |
+| `UnsubscribeByIdAsync(string)` | `Task` | 按 ID 精准注销 |
+| `GetStatistics(rateMs, mode)` | `ScanStatistics?` | 该 ScanGroup 的统计对象，无活跃 Tag 时返回 `null` |
+
+***
+
+## 使用示例 (Examples)
+
+**示例 1：S7 点位变化订阅（含死区过滤）**
+
+```csharp
+var s7Driver = driverRegistry.Get("S7_PLC_01");
+
+await s7Driver.SubscribeAsync(new UniconSubscription
+{
+    Address    = "DB1.DBD0",
+    ScanRateMs = 500,
+    Metadata   = new TagMetadata { Unit = "℃", Deadband = 0.3 },
+    Callback   = async dv =>
+    {
+        Console.WriteLine($"温度: {dv.Value} ℃ @ {dv.ServerTimestamp:HH:mm:ss.fff}");
+        await Task.CompletedTask;
+    }
+});
+```
+
+**示例 2：自定义 Redis 缓存提供者**
+
+```csharp
+// 实现 IUniconCacheProvider
+public class RedisCacheProvider : IUniconCacheProvider
+{
+    private readonly IDatabase _db;
+
+    public RedisCacheProvider(IConnectionMultiplexer redis)
+        => _db = redis.GetDatabase();
+
+    public async Task<DataValue<object>?> GetAsync(string driverId, string address, CancellationToken ct = default)
+    {
+        var json = await _db.StringGetAsync($"unicon:{driverId}:{address}");
+        return json.HasValue ? JsonSerializer.Deserialize<DataValue<object>>(json!) : null;
+    }
+
+    public async Task SetAsync(string driverId, string address, DataValue<object> dataValue, CancellationToken ct = default)
+    {
+        var json = JsonSerializer.Serialize(dataValue);
+        await _db.StringSetAsync($"unicon:{driverId}:{address}", json);
+    }
+
+    public async Task RemoveAsync(string driverId, string address, CancellationToken ct = default)
+        => await _db.KeyDeleteAsync($"unicon:{driverId}:{address}");
+}
+
+// 在 DI 注册（替换内置 MemoryCacheProvider）
+builder.Services.AddSingleton<IUniconCacheProvider, RedisCacheProvider>();
+```
+
+**示例 3：多地址共享同一 ScanGroup（零重复 IO）**
+
+```csharp
+// 相同 ScanRate + ScanMode 的订阅自动共享一个 ScanGroup
+// 两个地址只发生一次 ReadBatch IO，再分别通知各自订阅者
+await driver.SubscribeAsync(new UniconSubscription { Address = "DB1.DBD0", ScanRateMs = 100, Callback = ... });
+await driver.SubscribeAsync(new UniconSubscription { Address = "DB1.DBD4", ScanRateMs = 100, Callback = ... });
+await driver.SubscribeAsync(new UniconSubscription { Address = "DB1.DBD8", ScanRateMs = 100, Callback = ... });
+// → 同一 100ms ScanGroup，一次 ReadBatch 读取三个地址
+```
+
+---
+
+---
+url: /docs/x7dmsvsl/index.md
+---
+# 对象-设备映射引擎 (OdmEngine)
+
+## 概述 (Overview)
+
+对象-设备映射引擎 `OdmEngine`（Object-Device Mapper，简称 ODM）是 UniCon 工业通讯框架中用于将**北向业务结构化实体类**与**南向工业设备物理通道**进行双向绑定与自动映射的高阶反射组件。
+
+它提供了类似于传统 ORM（如 Entity Framework）的高抽象度开发体验。主要解决以下两大典型工业场景：
+
+* **场景 1 (结构化点位自动生成)**: 通过反射扫描实体类上的特性元数据，自动提取并解析生成设备所需的物理点位表定义，淘汰手动硬编码地址。
+* **场景 2 (实体动态物理读写与连接自适应)**: 通过实体类上标记的连接配置，系统在读取时若发现设备驱动未运行，能自动通过 `IConnectionManager` 实例化并拉起底层物理连接，随后反射式批量读取并回填实体；写入时亦能反射获取非只读属性，强类型转换后批量物理下发。
+
+为了极大降低开发者的使用成本、排除拼写隐患并提供完美的 IDE 代码补全 (IntelliSense) 支持，所有的关键参数均设计为强类型枚举（`UniconDriverType` 和 `UniconDataType`）。
+
+***
+
+## 使用方法 (Usage)
+
+`OdmEngine` 已被注册在依赖注入 (DI) 容器中。您可以在任何控制器、服务或后台任务中直接通过构造函数注入使用：
+
+```csharp
+public class ProductionLineController
+{
+    private readonly OdmEngine _odmEngine;
+
+    public ProductionLineController(OdmEngine odmEngine)
+    {
+        _odmEngine = odmEngine;
+    }
+}
+```
+
+在系统初始化时，确保主应用已为 `OdmEngine` 绑定了具体的物理驱动实例化工厂方法：
+
+```csharp
+// 在主应用启动时配置驱动生产工厂委托（由 DI 或手动绑定）
+OdmEngine.DriverFactory = CreateDriverInstance;
+```
+
+***
+
+## 参数说明 (Parameters)
+
+### 1. 实体特征绑定特性 (UniconDeviceAttribute)
+
+标记在类声明上，用于指定驱动元数据。
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| driverType | `UniconDriverType` | 协议类型枚举（如 `UniconDriverType.S7`, `UniconDriverType.Modbus`, `UniconDriverType.OpcUa` 等） | 是 | 无 |
+| connectionString | `string` | 物理连接配置字符串（支持配合 `ConnectionStringBuilder` 流式生成） | 是 | 无 |
+| driverId | `string?` | 驱动的全局唯一标识 ID | 否 | 若不填则默认使用类名称 |
+
+### 2. 点位地址绑定特性 (UniconAddressAttribute)
+
+标记在属性上，用于定义具体物理点位参数。
+| 参数名 | 类型 | 说明 | 是否必填 | 默认值 |
+|--------|------|------|----------|--------|
+| address | `string` | 设备物理地址路径（如 `"DB1.DBD0"`, `"holding:40001"` 等） | 是 | 无 |
+| type | `UniconDataType` | 目标强类型转换指示器（如 `UniconDataType.Float`, `UniconDataType.Int32` 等），可有效规避拼写错误 | 否 | `UniconDataType.Object` |
+| IsWritable | `bool` | 是否支持北向向此点位执行写入 | 否 | `true` |
+
+***
+
+## 返回值 (Returns)
+
+### 1. 结构扫描方法 (`GenerateTags<T>`)
+
+| 类型 | 说明 |
+|------|------|
+| `IEnumerable<TagMappingInfo>` | 返回实体中所有标记了 `UniconAddressAttribute` 特性的点位映射元数据集合（包含自动转换后的 `TypeHint` 字符串） |
+
+### 2. 实体自动填充读取方法 (`ReadEntityAsync<T>`)
+
+| 类型 | 说明 |
+|------|------|
+| `Task<T>` | 异步任务，返回由底层物理通道数值读取后，进行强类型自动转换并装配完成的全新实体实例 |
+
+### 3. 实体反射物理写入方法 (`WriteEntityAsync<T>`)
+
+| 类型 | 说明 |
+|------|------|
+| `Task<UniconResponse<bool>>` | 异步任务，返回统一响应结构，指明批量点位物理写入下发是否全部成功 |
+
+***
+
+## 使用示例 (Examples)
+
+### 示例 1：定义生产线实体 (ProductionLineEntity)
+
+无需任何硬编码解析，配合强类型枚举特性标记，实现无差错绑定：
+
+```csharp
+using UniCon.Core.Attributes;
+using UniCon.Core.Models;
+
+[UniconDevice(UniconDriverType.S7, "CpuType=S71200;Ip=192.168.0.100;Rack=0;Slot=1", driverId: "PLC_ODM_01")]
+public class ProductionLineEntity
+{
+    [UniconAddress("DB1.DBD0", UniconDataType.Float)]
+    public float Temperature { get; set; }
+
+    [UniconAddress("DB1.DBD4", UniconDataType.Float)]
+    public float Pressure { get; set; }
+
+    [UniconAddress("DB1.DBX8.0", UniconDataType.Boolean)]
+    public bool IsRunning { get; set; }
+
+    [UniconAddress("DB1.DBD10", UniconDataType.Int32)]
+    public int ProductCount { get; set; }
+}
+```
+
+***
+
+### 示例 2：场景 1 (点位架构自动扫描输出)
+
+```csharp
+// 注入 OdmEngine 实例
+var tags = odmEngine.GenerateTags<ProductionLineEntity>();
+foreach (var tag in tags)
+{
+    Console.WriteLine($"属性: {tag.PropertyName} => 地址: {tag.Address} (类型指示: {tag.TypeHint})");
+}
+```
+
+***
+
+### 示例 3：场景 2 (实体自适应批量物理读取与写入)
+
+```csharp
+// 1. 批量自适应读取：若设备驱动 "PLC_ODM_01" 未启动，
+// OdmEngine 会自动从元数据拉起其 Watchdog 自愈线程并建立 Socket 连接，然后自动反射读取并回填实体实例。
+ProductionLineEntity currentData = await odmEngine.ReadEntityAsync<ProductionLineEntity>();
+Console.WriteLine($"当前反应釜温度: {currentData.Temperature}°C, 是否在运行: {currentData.IsRunning}");
+
+// 2. 批量物理下发写入
+currentData.Temperature = 55.4f;
+currentData.ProductCount = 1200;
+
+var response = await odmEngine.WriteEntityAsync(currentData);
+if (response.Success)
+{
+    Console.WriteLine("反应釜设定参数与累计值已成功下发至物理 PLC。");
+}
+```
+
+---
+
+---
+url: /docs/xb4dudtf/index.md
+---
+# Web 接口与集成 (Web API & Integration)
+
+## 概述
+
+`UniCon.WebServer` 基于 ASP.NET Core Minimal API 提供完整的 RESTful 接口层，充当南向工业设备与北向 IT 系统之间的通用协议转换与配置桥梁。
+
+## 整体职责
+
+* **驱动生命周期管理**：允许在不重启服务的前提下，通过接口动态添加、查询、删除各类工业协议（S7、Modbus、OPC UA、MQTT、OPC UA PubSub）驱动实例。
+* **通用数据读写**：屏蔽底层协议差异，通过统一的 HTTP 格式对任意设备点位地址进行强类型读取和写入。
+* **订阅与实时缓存**：在内存中维持南向驱动的数据订阅，并在缓存中保存最新时间戳与数据质量，供北向客户端高速轮询。
+* **对象-设备映射（ODM）**：通过实体类特性自动生成点位映射表，并支持批量从设备读取数据自动填充实体、反射批量写入实体属性到设备。
+* **任务调度管理**：运行时动态创建、查询、更新、删除定时任务（CRUD）。
+
+***
+
+## 接口总览
+
+### 1. 驱动生命周期管理 `/api/drivers`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/drivers` | 获取所有已注册驱动的状态列表 |
+| `GET` | `/api/drivers/{id}` | 查询单个驱动详情 |
+| `POST` | `/api/drivers` | 动态注册并拉起新驱动（含 Watchdog 自愈） |
+| `DELETE` | `/api/drivers/{id}` | 停止、注销并销毁指定驱动 |
+
+### 2. 通用数据读写与订阅 `/api/drivers/{id}`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/drivers/{id}/read?address=&type=` | 强类型实时读取单个点位 |
+| `POST` | `/api/drivers/{id}/write` | 强类型实时写入单个点位 |
+| `POST` | `/api/drivers/{id}/subscribe` | 动态注册点位订阅（缓存最新值） |
+| `POST` | `/api/drivers/{id}/unsubscribe` | 取消指定点位订阅 |
+| `GET` | `/api/drivers/{id}/subscriptions` | 获取该驱动所有已订阅点位的缓存数据 |
+| `GET` | `/api/drivers/{id}/subscriptions/{*address}` | 获取单条订阅的实时缓存值 |
+
+### 3. 对象-设备映射（ODM）`/api/odm`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/odm/schema` | 反射扫描实体类，生成物理点位映射架构 |
+| `GET` | `/api/odm/data` | 按需拉起驱动并批量读取实体，自动填充返回 |
+| `POST` | `/api/odm/data` | 接收实体 JSON，反射批量写入物理设备 |
+
+### 4. 任务调度管理 `/api/jobs`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/jobs/executing-count` | 获取当前正在执行的任务数量 |
+| `GET` | `/api/jobs` | 获取所有已调度任务列表 |
+| `GET` | `/api/jobs/{id}` | 查询单个任务的详细信息 |
+| `POST` | `/api/jobs` | 动态创建并安排新任务 |
+| `PUT` | `/api/jobs/{id}` | 更新已安排任务的 Cron 表达式及参数 |
+| `DELETE` | `/api/jobs/{id}` | 注销并彻底删除指定任务 |
+
+***
+
+## 初始化配置
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddUniCon();       // 注入驱动注册中心、连接管理器、缓存、ODM 引擎
+builder.Services.AddUniConJobs();   // 注入任务调度系统
+
+var app = builder.Build();
+
+// 自动发现并注册所有带 [UniconDriver] 的驱动
+var driverRegistry = app.Services.GetRequiredService<IDriverRegistry>();
+driverRegistry.DiscoverAndRegisterDrivers();
+
+// 启动任务调度器
+var jobScheduler = app.Services.GetRequiredService<JobScheduler>();
+await jobScheduler.StartAsync();
+
+app.Run();
+```
+
+---
+
+---
+url: /docs/xuapd4se/index.md
+---
+# 驱动连接自愈与网络韧性设计文档
+
+## 概述 (Overview)
+
+随着 UniCon 在工业网关场景的应用，物理网络不稳定（如无线漫游/WIFI切换、以太网卡断开、IP变动等）以及各协议客户端自身通道中断，会直接影响网关与工业设备连接的健壮性。
+本文档阐述如何设计高可靠、超灵敏的底层连接感知事件体系与物理网络状态监控引擎，使系统能够自适应网络故障并在毫秒级完成连接自愈。
+
+***
+
+## 架构设计 (Architecture)
+
+```mermaid
+graph TD
+    SystemNetwork[系统底层网络变化 events] -->|触发| NetworkMonitor[NetworkMonitor]
+    NetworkMonitor -->|广播状态变化| DriverBase[DriverBase Watchdog]
+    
+    Driver[Modbus/Mqtt/OpcUa/S7 Driver] -->|连接异常或客户端事件| DriverBase
+    
+    DriverBase -->|网络不可用| PauseReconnect[挂起 Reconnect 定时器]
+    DriverBase -->|网络恢复可用| TriggerReconnect[即刻触发 Reconnect 机制]
+```
+
+### 1. 网络监控层 (Infra)
+
+* **INetworkMonitor**: 抽象的系统网络状态检测接口。
+* **NetworkMonitor**: 基于 .NET Standard 的 `System.Net.NetworkInformation.NetworkChange` 事件，动态监控系统的网卡活动及网络可用性状态。
+
+### 2. 驱动协调层 (Core)
+
+* **DriverBase**:
+  * 构造函数注入 `INetworkMonitor`。
+  * 重构 `WatchdogLoopAsync`：
+    * 在进入 `ReconnectAsync` 之前，判断 `_networkMonitor.IsNetworkAvailable` 是否为 `false`。如果是，则暂时挂起（暂停重连操作，减少无效的套接字连接日志与 CPU 消耗），直到 `NetworkAvailabilityChanged` 触发且为 `true` 时，唤醒 Watchdog 快速触发重连。
+    * 允许派生驱动通过监听底层套接字/客户端的连接失效事件（如 `Faulted`, `Closed`, `Disconnected` 等），直接更新 `State = DriverState.Faulted`。这将在 Watchdog 下一次循环（或触发信号）时即刻激活自愈流程，实现毫秒级反应。
+
+### 3. 通讯协议驱动层 (Drivers)
+
+* **MqttDriver**: 挂载 `IMqttClient.DisconnectedAsync` 事件。
+* **OpcUaDriver**: 挂载 `ClientSessionChannel.Faulted` 与 `Closed` 事件。
+* **ModbusDriver**: 在 `InternalReadAsync` / `InternalWriteAsync` 中捕获 Socket 错误或通信异常，直接转换 `State = DriverState.Faulted`；并在 `PingAsync` 中检验底层 Socket 连通性。
+* **S7Driver**: 在 `InternalReadAsync` / `InternalWriteAsync` / `ReadBatchAsync` / `WriteBatchAsync` 中捕获 `PlcException` / `SocketException`，即刻修改驱动状态为 `Faulted`。
+* **OpcUaPubSubDriver**: 在 `IPubSubTransport` 扩展 `ConnectionLost` 事件，并在 `MqttPubSubTransport` 异常断开时抛出，由驱动捕获并转换 `State = DriverState.Faulted`。
+
+***
+
+## 接口说明 (Interfaces)
+
+### 1. INetworkMonitor 接口
+
+```csharp
+namespace UniCon.Core.Network;
+
+public interface INetworkMonitor
+{
+    /// <summary>
+    /// 获取当前系统网络是否可用
+    /// </summary>
+    bool IsNetworkAvailable { get; }
+
+    /// <summary>
+    /// 当系统网络可用性发生改变时触发
+    /// </summary>
+    event EventHandler<bool>? NetworkAvailabilityChanged;
+}
+```
+
+### 2. IPubSubTransport 扩展
+
+```csharp
+namespace UniCon.Drivers.OpcUaPubSub.Transports;
+
+public interface IPubSubTransport : IAsyncDisposable
+{
+    event EventHandler<byte[]>? OnMessageReceived;
+    
+    /// <summary>
+    /// 当传输物理连接丢失时触发
+    /// </summary>
+    event EventHandler? ConnectionLost;
+
+    Task ConnectAsync(Uri uri, CancellationToken ct = default);
+    Task DisconnectAsync(CancellationToken ct = default);
+}
+```
+
+***
+
+## 数据流设计 (Data Flow)
+
+### 1. 物理断网自愈流程
+
+```
+[操作系统断网/切WIFI] 
+      │
+      ▼
+[NetworkChange.NetworkAvailabilityChanged] 触发
+      │
+      ▼
+[NetworkMonitor.IsNetworkAvailable] 设为 false
+      │
+      ▼
+[NetworkMonitor.NetworkAvailabilityChanged] 广播 false
+      │
+      ▼
+[DriverBase Watchdog] 挂起重连定时器，拒绝无效 TCP 请求
+      │
+[系统网络恢复]
+      │
+      ▼
+[NetworkMonitor.NetworkAvailabilityChanged] 广播 true
+      │
+      ▼
+[DriverBase Watchdog] 立即唤醒 ReconnectAsync 流程
+      │
+      ▼
+[OnConnectAsync] 执行，设备恢复连通
+```
+
+### 2. 协议客户端断线事件流程
+
+```
+[设备断电/通道中断]
+      │
+      ▼
+[底层 Client (如 MqttClient / OPC UA ClientChannel) 事件触发]
+      │
+      ▼
+[Driver 监听到 Disconnected / Faulted]
+      │
+      ▼
+[State = DriverState.Faulted] (改变状态)
+      │
+      ▼
+[WatchdogLoop] 下一次循环立即触发 [ReconnectAsync]
+```
+
+***
+
+## 边界与技术债 (Risks & Boundaries)
+
+1. **多网卡环境下的“可用性”判断限制**：
+   `NetworkInterface.GetIsNetworkAvailable()` 在具有虚拟网卡（如 Docker, VPN, VMware 等）的系统中，可能总是返回 `true`。因此我们在 `NetworkMonitor` 中同时监测 `NetworkChange.NetworkAddressChanged`，并在断线或连接中捕获套接字异常以作为终极兜底。
+2. **连接风暴**：
+   在断网恢复的瞬间，如果系统中存在成百上千个驱动，可能会因同时发起重连而引发“连接风暴”。我们在 `DriverBase` 中依然保留指数退避时间算法，仅在网络从不可用恢复为可用时重置/唤醒立即连接，结合 `SemaphoreSlim` 串行连接控制，以减轻底层握手压力。
+
+---
+
+---
+url: /docs/yjh9le2c/index.md
+---
+# 快速入门与集成指南
+
+本指南介绍如何在第三方项目中引用 UniCon 框架并快速实现工业设备通讯与采集调度。
+
+## 1. 安装与引用
+
+UniCon 采用高度解耦的**插件化与模块化**架构设计。核心框架与各个具体物理通信驱动均已在 NuGet 仓库中作为独立的包发布。
+
+::: tip 💡 我需要依次安装所有的 NuGet 包吗？
+**不需要。**
+您只需且必须安装核心依赖包 **`UniCon.Core`**，然后根据您实际的工业场景，**仅选择性地安装需要的特定协议驱动包**即可。例如，若您的项目仅需要采集 S7 PLC 数据和 Modbus 寄存器，则只需安装 `UniCon.Core`、`UniCon.Drivers.S7` 和 `UniCon.Drivers.Modbus`。这样可以避免引入多余的外部三方依赖（如 OPC UA 或 MQTTnet 库），保持您的业务项目极简、纯净与高效。
+:::
+
+### 📦 核心调度引擎 (必选)
+
+* **.NET CLI**:
+  ```bash
+  dotnet add package UniCon.Core
+  ```
+* **Package Manager 控制台**:
+  ```powershell
+  Install-Package UniCon.Core
+  ```
+
+### 🔌 物理通讯驱动包 (按需选择)
+
+| 驱动名 | 说明 | .NET CLI 安装命令 |
+| :--- | :--- | :--- |
+| **`UniCon.Drivers.S7`** | 西门子全系列 PLC (S7-1200/1500/300) | `dotnet add package UniCon.Drivers.S7` |
+| **`UniCon.Drivers.OpcUa`** | 高性能 OPC UA 客户端通讯 | `dotnet add package UniCon.Drivers.OpcUa` |
+| **`UniCon.Drivers.Modbus`** | 标准 Modbus TCP 物理设备 | `dotnet add package UniCon.Drivers.Modbus` |
+| **`UniCon.Drivers.Mqtt`** | 轻量级 MQTT 消息队列发布与订阅 | `dotnet add package UniCon.Drivers.Mqtt` |
+| **`UniCon.Drivers.OpcUaPubSub`** | OPC UA PubSub UDP/MQTT 驱动 | `dotnet add package UniCon.Drivers.OpcUaPubSub` |
+
+***
+
+## 2. 集成到 ASP.NET Core（推荐方式）
+
+UniCon 提供开箱即用的扩展方法，一键注入注册中心、连接管理器、缓存与任务调度器。
+
+### Program.cs 注册示例
+
+```csharp
+using UniCon.Core;
+using UniCon.Core.Jobs;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// 一键注入 UniCon 核心服务
+// 包含：IDriverRegistry, IConnectionManager, INetworkMonitor,
+//       OdmEngine, IUniconCacheProvider(MemoryCacheProvider)
+builder.Services.AddUniCon();
+
+// 一键注入任务调度系统（含 Quartz.NET 与内置 Job 自动扫描）
+builder.Services.AddUniConJobs();
+
+var app = builder.Build();
+
+// 自动发现并注册所有带 [UniconDriver] 特性的驱动程序集
+var driverRegistry = app.Services.GetRequiredService<IDriverRegistry>();
+driverRegistry.DiscoverAndRegisterDrivers();
+
+// 启动任务调度器
+var jobScheduler = app.Services.GetRequiredService<JobScheduler>();
+await jobScheduler.StartAsync();
+
+app.Run();
+```
+
+***
+
+## 3. 基础通讯示例（通过 DI 工厂创建驱动）
+
+在 ASP.NET Core 项目中，推荐使用 `IDriverRegistry` 创建并管理驱动。驱动的所有依赖（`ILogger`、`IUniconCacheProvider`、`INetworkMonitor`）均由 DI 容器自动装配。
+
+```csharp
+using UniCon.Core;
+using UniCon.Core.Models;
+
+public class PlcService
+{
+    private readonly IDriverRegistry _driverRegistry;
+    private readonly IConnectionManager _connectionManager;
+
+    public PlcService(IDriverRegistry driverRegistry, IConnectionManager connectionManager)
+    {
+        _driverRegistry = driverRegistry;
+        _connectionManager = connectionManager;
+    }
+
+    public async Task InitializeAsync()
+    {
+        // 通过别名创建 S7 驱动（DI 自动装配所有依赖）
+        var driver = _driverRegistry.CreateDriver("S7", "PLC_Line1");
+        _driverRegistry.Register(driver);
+
+        // 启动连接（初始失败后 Watchdog 自动指数退避重连）
+        await _connectionManager.RegisterDriverAsync(
+            driver,
+            "CpuType=S71200;Ip=192.168.0.10;Rack=0;Slot=1"
+        );
+
+        // 单点读取
+        var request = new UniconRequest { Address = "DB1.DBD0" };
+        var response = await driver.ReadAsync<float>(request);
+        if (response.Success)
+        {
+            Console.WriteLine($"温度值: {response.Data?.Value} °C");
+            Console.WriteLine($"数据质量: {response.Data?.Quality}");
+            Console.WriteLine($"PLC时间戳: {response.Data?.SourceTimestamp}");
+        }
+    }
+}
+```
+
+***
+
+## 4. 主动采集订阅引擎
+
+对于 S7、Modbus 等不具备主动推送能力的协议，UniCon v2 提供完整的主动轮询订阅引擎。
+
+```csharp
+// 结构化订阅（推荐，含死区过滤与元数据）
+var subId = await driver.SubscribeAsync(new UniconSubscription
+{
+    Address    = "DB1.DBD0",
+    ScanRateMs = 500,                         // 每 500ms 轮询一次
+    ScanMode   = UniconScanMode.ExceptionBased, // 仅值或质量变化时回调
+    Metadata   = new TagMetadata
+    {
+        Name     = "反应釜温度",
+        Unit     = "℃",
+        Deadband = 0.5   // 变化 < 0.5℃ 不触发通知
+    },
+    Callback = async dataValue =>
+    {
+        Console.WriteLine($"[{dataValue.ServerTimestamp:HH:mm:ss.fff}] 温度: {dataValue.Value} ℃");
+        await Task.CompletedTask;
+    }
+});
+
+// 按 ID 精准取消订阅
+await driver.UnsubscribeByIdAsync(subId);
+```
+
+***
+
+## 5. 批量操作
+
+### 批量读取（S7 自动合并连续点位，最大 19 个/次）
+
+```csharp
+var requests = new List<UniconRequest>
+{
+    new() { Address = "DB1.DBD0" },
+    new() { Address = "DB1.DBD4" },
+    new() { Address = "DB1.DBX8.0" }
+};
+
+var results = await driver.ReadBatchAsync(requests);
+foreach (var res in results)
+{
+    if (res.Success)
+        Console.WriteLine($"值: {res.Data?.Value}, 质量: {res.Data?.Quality}");
+}
+```
+
+### 获取扫描统计
+
+```csharp
+var stats = driver.GetStatistics(500, UniconScanMode.ExceptionBased);
+if (stats != null)
+{
+    Console.WriteLine($"扫描次数: {stats.ScanCount}");
+    Console.WriteLine($"通知次数: {stats.NotifyCount}");
+    Console.WriteLine($"平均读取耗时: {stats.AverageReadDurationMs:F1}ms");
+    Console.WriteLine($"错误率: {stats.ErrorRate:P2}");
+}
+```
+
+***
+
+## 6. 常见协议连接字符串参考
+
+| 协议 | 连接字符串示例 |
+| :--- | :--- |
+| **S7** | `CpuType=S71200;Ip=192.168.0.10;Rack=0;Slot=1` |
+| **S7（含超时）** | `CpuType=S71500;Ip=192.168.0.10;Rack=0;Slot=1;ReadTimeout=3000;WriteTimeout=3000` |
+| **Modbus** | `ip=192.168.0.50;port=502;unitid=1;timeout=2000` |
+| **OPC UA（匿名）** | `opc.tcp://192.168.0.100:4840` |
+| **OPC UA（账户密码）** | `EndpointURL=opc.tcp://192.168.0.100:4840;Username=admin;Password=secret` |
+| **MQTT** | `server=broker.hivemq.com;port=1883;clientid=UniCon_01` |
+| **MQTT（TLS）** | `server=broker.example.com;port=8883;username=user;password=pwd;usetls=true` |
+| **OPC UA PubSub（UDP）** | `opc.udp://224.0.2.14:4840` |
+| **OPC UA PubSub（MQTT）** | `mqtt://192.168.0.200:1883/opcua/pubsub` |
+
+***
+
+## 7. 驱动状态监听
+
+```csharp
+driver.StateChanged += (_, e) =>
+{
+    Console.WriteLine($"[{e.DriverId}] 状态变更: {e.OldState} → {e.NewState}");
+};
+```
+
+***
+
+## 8. 使用快捷连接扩展方法
+
+`ConnectionStringBuilder` 提供强类型流式 API 避免手动拼接字符串：
+
+```csharp
+using UniCon.Core.Helpers;
+
+// 方式一：流式构建连接串
+string connStr = ConnectionStringBuilder.S7()
+    .WithCpuType(S7CpuType.S71500)
+    .WithIp("192.168.1.10")
+    .WithRack(0)
+    .WithSlot(1)
+    .Build();
+// 输出: CpuType=S71500;Ip=192.168.1.10;Rack=0;Slot=1
+
+// 方式二：直接使用快捷扩展方法（推荐）
+var driver = _driverRegistry.CreateDriver("S7", "PLC_01");
+bool isConnected = await driver.ConnectS7Async("192.168.1.10", S7CpuType.S71500);
+```
+
+---
+
+---
+url: /versions/6khy1hnx/index.md
+---
+# v2.1.0 — Job 调度系统功能增强与 IoC 封装
+
+**日期**：2026-05-18
+**类型**：Feature / Enhancement
+
+***
+
+## 变更概述
+
+为了提升 UniCon 系统任务调度的灵活性与易用性，本次更新对 Job 模块进行了全面升级，包括：
+
+1. **当前执行任务统计**：新增实时统计和获取当前正在执行的 Job 数量及上下文信息。
+2. **完整的增删改查 (CRUD)**：支持对已调度任务进行添加、修改 (Reschedule / 更新 JobData)、删除和查询详情/列表。
+3. **IoC 扩展集成 (AddUniConJobs)**：封装一键式 IoC 容器注入方法，极大降低了用户集成和使用 Job 模块的门槛。
+4. **单元测试与 API 路由补全**：新增/更新对应的测试用例及 WebServer 的 API 路由，确保生产级稳定性。
+
+***
+
+## \[v2.1.0] - 2026-05-18
+
+### Added / Changed / Fixed
+
+* **Added**：新增 `JobInfo` 数据模型，用以优雅呈现当前任务的调度状态、参数配置及触发器类型。
+* **Added**：在 `JobScheduler` 中实现了活动任务运行统计 `GetExecutingJobsCountAsync()`、获取全局任务列表 `GetJobsAsync()` 以及获取单个任务调度详情 `GetJobAsync(id)`。
+* **Added**：实现了高灵活性的任务增删改查 (CRUD)，支持按静态强类型或运行时动态类型调度 `ScheduleJobAsync(...)`，按唯一 Key 删除任务 `DeleteJobAsync(id)`，以及动态更新 Cron 规则与伴随参数 `UpdateJobAsync(...)`。
+* **Added**：在 `ServiceCollectionExtensions` 中设计了 `AddUniConJobs()` 极简 IoC 扩展，集成了 Quartz.NET 微软依赖注入工厂支持，并对当前程序集内所有非抽象的 `IJob` 实现类进行自动扫描和瞬时依赖项注入。
+* **Added**：在 WebServer 项目中为 `Program.cs` 配套完成了 5 个极简 Web API 路由，用于监控和控制运行时的任务生命周期。
+* **Added**：为测试项目 `JobSystemTests.cs` 配套补充了 4 个涵盖 CRUD 和统计的完整单元测试。
+* **Added**：补充了组件架构和 API 设计文档于 `docs/4. jobs/` 目录。
+
+### Key Changes
+
+* 将原本繁琐的 Quartz 集成流程与内置任务注册封装合并为了极简的 `builder.Services.AddUniConJobs();` 一行式注入，对用户完全隐藏了底层复杂的配置逻辑。
+* 动态 API 支持解析任意实现了 `IJob` 接口的任务，解决了传统框架下必须预先硬编码依赖注入导致的任务扩展受限瓶颈。
+* 统一了运行时与调度器的生命周期托管，修复了可能导致上下文死锁的 Disposing 泄露。
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: Job 调度系统升级
+
+### 🎯 最终目标
+
+* 完善 `JobScheduler` CRUD、当前执行数量统计，并在 `ServiceCollectionExtensions` 中提供一键 IoC 注入，补全单元测试与 API 路由。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] src/UniCon.Core/Jobs/JobInfo.cs (新增 Job 详情信息模型)
+* \[x] src/UniCon.Core/Jobs/JobScheduler.cs (完善 CRUD 及统计方法)
+* \[x] src/UniCon.Core/ServiceCollectionExtensions.cs (增加 AddUniConJobs 的 IoC 扩展)
+* \[x] tests/UniCon.Tests/JobSystemTests.cs (补充新功能的单元测试)
+* \[x] src/UniCon.WebServer/Program.cs (更新 IoC 注入并添加 Job 相关的 API 路由)
+* \[x] docs/4. jobs/1.intro.md (完善文档)
+
+### 📝 Steps
+
+* \[x] Step 1: 新建 `JobInfo.cs` 信息模型。
+* \[x] Step 2: 完善 `JobScheduler.cs`，实现执行数量统计、获取 Job 列表/详情、动态调度、删除和更新 Job 的方法。
+* \[x] Step 3: 在 `ServiceCollectionExtensions.cs` 中增加 `AddUniConJobs` 一键 IoC 注入方法。
+* \[x] Step 4: 在 `JobSystemTests.cs` 中编写单元测试验证 Job 统计、CRUD 功能。
+* \[x] Step 5: 优化 `Program.cs` 里的 IoC 注册，并增加 Job 的增删改查及统计 API 路由。
+* \[x] Step 6: 编写/更新 `/docs/4. jobs` 相关文档，并执行质量门禁 (`dotnet build` & `dotnet test`)。
+
+\------details end------
+
+---
+
+---
+url: /versions/arx6x80d/index.md
+---
+# v2.3.0 — 驱动工厂与注册中心整合及反射动态装配系统 (v2.3)
+
+**日期**：2026-05-18
+**类型**：Feature / Architecture / Decoupling
+
+***
+
+## 变更概述
+
+在本次架构迭代中，我们针对 `IDriverFactory` 与 `IDriverRegistry` 职责合并进行了二次演进，设计并实现了一套完全解耦、面向切面的**反射驱动装配系统**：
+
+1. **统一自扫描标记 (`UniconDriverAttribute`)**：引入了自定义特性 `[UniconDriver(string driverType)]`，用于修饰具体的南向物理驱动类（如 `S7Driver`, `ModbusDriver`）。
+2. **免配置零代码发现 (`DiscoverAndRegisterDrivers`)**：在统一服务 `IDriverRegistry` 接口上增加了自动发现功能。该功能不仅扫描当前运行 AppDomain 中的已加载程序集，还智能扫描并主动加载执行目录中的所有 `UniCon.Drivers.*.dll` 驱动模块。
+3. **彻底去除编译时依赖**：
+   * 彻底移除了 `src/UniCon.WebServer/Program.cs` 入口对 `S7Driver`, `ModbusDriver`, `OpcUaDriver`, `MqttDriver`, `OpcUaPubSubDriver` 等物理驱动类名与 `using` 命名空间的依赖。
+   * 实现了高可用、解耦的南向“即插即用 (Plug-and-Play)”插件化架构。
+
+***
+
+## \[v2.3.0] - 2026-05-18
+
+### Added
+
+* **UniconDriverAttribute**: Custom attribute for decorating concrete southbound communication driver classes with their protocol alias.
+* **DiscoverAndRegisterDrivers**: Dynamic reflection scanning method inside `IDriverRegistry` to automatically discover, load, and register southbound modules across `AppDomain` and output directory `dll` files.
+* **Plug-and-Play Southbound Ecosystem**: Allows adding new drivers simply by dropping their compiled `dll` inside the execution directory without modifying the host webserver's startup code.
+
+### Removed
+
+* **Manual Mapping Registrations**: Deleted hardcoded manual type mappings in `Program.cs` and matching compile-time southbound dependencies.
+* **IDriverFactory & DriverFactory (standalone)**: Removed standalone redundant factory components.
+
+### Changed
+
+* **CommunicationService**: Refactored to inject only the unified single service `IDriverRegistry`.
+* **Program.cs**: Simplified host startup by calling `driverRegistry.DiscoverAndRegisterDrivers()`.
+* **DriverFactoryTests**: Refactored xUnit tests to test automated scanning discovery rather than hardcoded registry setups.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 统一整合驱动工厂与注册中心 (Unified Driver Registry & Factory)
+
+### 🎯 最终目标
+
+* 将独立的 `IDriverFactory` 与 `IDriverRegistry` 合并为一个统一的 `IDriverRegistry` 接口和 `DriverRegistry` 实现，实现活跃实例管理与自动依赖装配工厂的二合一；
+* 在 `ServiceCollectionExtensions.cs` 中精简为单例注入 `IDriverRegistry`，免去注册多个服务组件的繁琐；
+* 引入 `[UniconDriver]` 自定义特性和反射自动扫描，实现运行时自装配和完全解耦的即插即用插件化南向生态；
+* 重构 WebServer 程序启动项、CommunicationService 服务以及单元测试以完全对接合并后的 `IDriverRegistry`。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] docs/2. core/2.driver-registry.md (原因：重写并合并注册中心与工厂模式的架构说明文档)
+* \[x] src/UniCon.Core/Attributes/UniconDriverAttribute.cs (原因：新建自动扫描特性标记)
+* \[x] src/UniCon.Core/IDriverRegistry.cs (原因：重构以集成 IDriverFactory 的接口方法与反射自发现实现)
+* \[x] src/UniCon.Core/ServiceCollectionExtensions.cs (原因：精简 IoC 服务注入，仅保留统一注册中心 IDriverRegistry)
+* \[x] src/UniCon.WebServer/Program.cs (原因：在启动项中删除所有硬编码的驱动依赖，并调用 DiscoverAndRegisterDrivers 进行自动装配)
+* \[x] src/UniCon.WebServer/Services/CommunicationService.cs (原因：全面重构以通过单服务 IDriverRegistry 同时完成驱动的工厂创建与状态索引)
+* \[x] tests/UniCon.Tests/DriverFactoryTests.cs (原因：重构单元测试，全面对接合并后的 IDriverRegistry，验证反射自扫描装配功能)
+* \[x] versions/v2.3.0.md (原因：追加版本变更描述，真实记录本次架构整合与反射扫描重构)
+
+### 📝 Steps
+
+* \[x] **Step 1: 编写并整合文档**，合并 `docs/2. core/2.driver-registry.md`，删除临时 `docs/3. drivers/7.driver-factory.md`。
+* \[x] **Step 2: 重构 `src/UniCon.Core/IDriverRegistry.cs`**，将工厂别名管理与自动装配逻辑整合至 `IDriverRegistry`。
+* \[x] **Step 3: 删除重复文件 `src/UniCon.Core/IDriverFactory.cs`**，消除物理冗余。
+* \[x] **Step 4: 精简 `ServiceCollectionExtensions.cs` 中的服务注册逻辑**，仅注入单例 `IDriverRegistry`。
+* \[x] **Step 5: 重构 `Program.cs` 与 `CommunicationService.cs` 的初始化与依赖逻辑**，完全接入统一接口。
+* \[x] **Step 6: 重构并运行 `DriverFactoryTests.cs` 等所有单元测试**，确保质量门禁完全通过。
+* \[x] **Step 7: 归档版本变更记录**。
+
+\------details end------
+
+---
+
+---
+url: /versions/cxhpkg0z/index.md
+---
+# UniCon 版本更新记录
+
+## \[v1.4.0] - 2026-05-16
+
+### 更新内容
+
+* **通讯契约重构 (Core Refactor)**:
+  * 引入了 **结构化请求与响应模型** (`UniconRequest`, `UniconResponse`)，模拟 HTTP 设计思路，支持 Headers、Parameters 和 Body。
+  * 统一了所有驱动的调用接口，能够灵活应对需要额外元数据的复杂通讯协议。
+* **批量操作支持 (Batch Operations)**:
+  * `IUniconDriver` 接口新增 `ReadBatchAsync` 和 `WriteBatchAsync` 方法。
+  * `DriverBase` 提供了默认的循环读取实现，驱动子类可根据底层协议（如 Modbus 批量读、S7 多变量读）进行高性能重写。
+* **架构一致性**:
+  * `CommunicationJob` 与 `CommunicationService` 均已适配新的结构化契约。
+  * 增强了 API 响应信息，Web 层现在可以返回包含协议级错误详情的完整响应结构。
+
+### 与上一版本区别
+
+* **灵活性**: 摆脱了只能传递单一 `address` 字符串的束缚，现在可以随请求传递认证信息、超时时间、槽位等任意扩展参数。
+* **吞吐量**: 具备了批量处理能力，能够显著减少网络往返次数，提升大规模数据采集的效率。
+* **标准化**: 将工业通讯抽象为类 Web 的 Request/Response 模式，极大降低了集成第三方异构系统的难度。
+
+---
+
+---
+url: /versions/e413n77w/index.md
+---
+# UniCon 版本更新记录
+
+## \[v1.7.0] - 2026-05-17
+
+### 更新内容
+
+* **西门子 OPC UA PubSub 官方库集成 (Siemens OPC UA PubSub Integration)**:
+  * **三合一组件集成**: 完美地将 Siemens `opc-ua-pubsub-dotnet` 的三大组件（`Binary` 二进制解析库、`Client` 通讯客户端、`Broker` 本地代理服务）合并集成到项目主工程。
+  * **升级到 .NET 10.0**: 成功将全部三个 Siemens 库从旧版的 .NET 8.0 升级适配到项目统一的标准 **.NET 10.0**。
+  * **统一命名空间**: 彻底重构并迁移了 Siemens 的所有代码命名空间，由原有的 `opc.ua.pubsub.dotnet` 统一修改为了 `UniCon.OpcUaPubSub`（包括 `.Client`，`.Binary`，`.Broker` 等子模块），实现命名体系的百分之百自研规范化。
+  * **移除 GitVersion 构建依赖**: 剔除了 Siemens 库内部复杂的 `GitVersionTask` 编译依赖，成功缩短了 CI/CD 的构建时长。
+  * **新增 UADP 二进制解码器**: 编写了高并发生产级别的 `UadpPubSubDecoder`，支持在 UDP 多播通讯中完美调用 Siemens 库的二进制反序列化器，完成实时 UADP 协议的解析与 `DataValue` 的高级质量字段映射。
+  * **自适应解码引擎升级**: 重写了 `OpcUaPubSubDriver` 的解码挂载逻辑，使其根据连接字符串中的协议 Schema（UDP 协议）与参数（MQTT 下的 query `encoding=binary`）自适应装配并切换 `JsonPubSubDecoder` 与 `UadpPubSubDecoder`。
+
+### 与上一版本区别
+
+* **UADP 协议支持**: 从原本仅支持 MQTT JSON 数据源，飞跃至全面支持 OPC UA Part 14 定义的 UDP 多播 UADP 极速二进制传输协议。
+* **系统稳健性**: 所有的底层解码完全基于西门子官方工业标准库实现，对字段属性、MDSP 质量标志、时间戳解析拥有更高的精确度。
+* **构建一致性**: 统一了全解决方案的 TargetFramework，消除了依赖框架降级和不兼容的警告，使构建变得极其轻快、可靠。
+
+---
+
+---
+url: /versions/gi8a4rwu/index.md
+---
+# UniCon 版本更新记录
+
+## \[v1.5.0] - 2026-05-16
+
+### 更新内容
+
+* **驱动架构加固 (Architecture Hardening)**:
+  * **数据质量体系**: 引入 DataValue\<T> 包装类，支持 `DataStatus` 质量戳和 `SourceTimestamp` 时间戳，满足工业数据追溯需求。
+  * **并发控制**: 在 `DriverBase` 中内置 `SemaphoreSlim` 同步锁，强制串行访问物理通道，彻底解决串行协议在高并发下的指令交织问题。
+  * **状态机模型**: 将 `IsConnected` 升级为 `DriverState` 枚举（Disconnected, Connecting, Connected, Faulted），并增加 `PingAsync` 心跳机制。
+  * **标准化取消机制**: 所有 IO 操作方法签名全面支持 `CancellationToken`，支持超时终止与优雅退出。
+  * **响应增强**: `UniconResponse` 增加 `StatusCode` 状态码，支持程序化的错误分类处理。
+* **稳定性优化**:
+  * `ConnectionManager` 现在根据细化的 `DriverState` 进行自愈调度。
+  * `CommunicationJob` 已适配 Quartz 系统的 `CancellationToken`。
+  * 统一了驱动内部实现的 `InternalRead/Write` 模板模式，简化了新驱动的开发难度。
+
+### 与上一版本区别
+
+* **可靠性**: 从简单的“能通就行”升级为具备“并发保护”和“质量追溯”的工业级通讯底座。
+* **可维护性**: 引入了模板方法模式，核心并发锁逻辑由基类统一管理，子类只需关注协议报文解析。
+* **可监控性**: 通过状态机和 StatusCode，上层应用可以精确区分“网络超时”、“地址非法”与“未授权”等不同故障场景。
+
+---
+
+---
+url: /versions/hqv6ob1j/index.md
+---
+# UniCon 版本更新记录
+
+## \[v1.8.0] - 2026-05-17
+
+### 变更类型
+
+* **Feature (新功能)**: 动态通讯驱动生命周期管理、通用强类型 RESTful 网关、一键 IoC 依赖注入以及高灵活性物联网对象-设备映射引擎 (UniCon ODM)。
+
+### 更新内容
+
+* **对象-设备映射引擎 (UniCon ODM - Object-Device Mapper)**:
+  * **元数据 Attribute 契约**: 设计了 `UniconDeviceAttribute`（标记实体类，绑定驱动类型、配置及 ID）与 `UniconAddressAttribute`（标记属性，配置物理地址、强类型 Hint 及读写控制）自定义特性。
+  * **场景 1 (点位表元数据自动扫描生成)**: 实现了 `OdmEngine.GenerateTags<T>()` 引擎方法，能够自动扫描实体的特性配置，输出属性与工控物理地址的映射架构，消除冗余的手动硬编码映射。
+  * **场景 2 (实体自适应读写与自愈联动)**: 实现了 `ReadEntityAsync<T>()` 与 `WriteEntityAsync<T>()` 反射读写方法。读取时能自适应检测驱动运行状态，若驱动未加载则可自动从 Attribute 读取物理连接信息并由连接自愈管理器拉起，随后反射批量读取点位值并自动转换为属性类型回填实体。写入时能反射读取非只读属性，强类型转换后物理下发写入。
+  * **反射动态解耦工厂**: 在 `OdmEngine` 中设计了静态委托 `DriverFactory`，外部主程序在启动时自动挂载本地驱动反射实例器（`CreateDriverInstance`），保证了 Core 核心库对南向具体驱动程序集的零偶合。
+  * **演示实体与 REST 端点组**: 创建了生产级工业实体示例 [ProductionLineEntity.cs](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/src/UniCon.WebServer/Models/ProductionLineEntity.cs)，并在 [Program.cs](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/src/UniCon.WebServer/Program.cs) 中暴露了 `/api/odm/schema` 及 `/api/odm/data` 的 RESTful APIs 进行直观的功能交互。
+* **一键 IoC 依赖注入与契约解耦 (IoC & DI Bootstrapping)**:
+  * **DIP 依赖倒置重构**: 引入了 `IConnectionManager` 契约，将 `ConnectionManager` 进行接口级解耦，使其全面符合 Clean Architecture 规范。
+  * **轻量级 DI 抽象**: 核心库引入了 `Microsoft.Extensions.DependencyInjection.Abstractions` 依赖，确保包的轻量级与通用依赖注入的契约完备性。
+  * **开箱即用扩展**: 编写了 `ServiceCollectionExtensions.AddUniCon` 扩展方法，使外部应用（NuGet 消费者）能够通过单行代码一键注入 `IDriverRegistry`、`IConnectionManager` 与 `OdmEngine`（全局单例托管，保障物理 Socket 与自愈 Watchdog 线程的全局唯一性）。
+  * **解耦构造注入**: 重构了 `CommunicationService`，使其彻底通过构造函数注入 `IConnectionManager`，完全消除了原本在类内部手动 `new` 创建物理管理器的紧耦合缺陷。
+* **动态驱动生命周期管理 (Dynamic Driver Management)**:
+  * 去除了 `CommunicationService` 中模拟硬编码 PLC 初始化逻辑，实现完全由北向 RESTful API 动态驱动实例化及托管的机制。
+  * 支持动态添加并拉起 `S7`、`Modbus`、`OpcUa`、`Mqtt` 与 `OpcUaPubSub` 五大协议的独立驱动实例，并为其开启自愈守护进程 (`Watchdog`)。
+  * 提供了动态注销、断开并销毁驱动的生命周期管理能力，实现完整的物理资源回收。
+* **通用强类型反射读写 (Generic Reflective IO)**:
+  * 扩展了 `IUniconDriver` 与 `DriverBase` 接口，支持暴露 `ConnectionString` 属性。
+  * 开发了基于 C# 反射及泛型推导的高性能通用即时读写引擎，能够自适应北向传入的 `typeHint`（如 `int`, `float`, `double`, `bool`, `string`）并映射到对应驱动泛型方法中，无须为每种数据类型重复编写 API。
+* **高性能订阅值事件缓存 (Unified In-Memory Subscription Cache)**:
+  * 在 `CommunicationService` 中实现了线程安全的北向数据事件回调缓存字典，订阅事件触发时自动捕获质量戳 (`Quality`) 和源时间戳 (`SourceTimestamp`) 并暂存内存。
+  * 提供了即时获取单个订阅值、或批量拉取全部活动订阅项缓存的 REST 接口。
+
+### 与上一版本区别
+
+* **工业 ODM 对象映射能力**: 新增了类似 Entity Framework 的工业实体自动映射器，彻底改变了传统通过硬编码点位地址与手动数据转换的工控开发模式，极大地提升了系统的拓展性。
+* **高阶解耦与可测性**: 通过引入 `IConnectionManager` 接口，外部项目和单元测试能够对连接管理器进行 Mock 测试，极大提升了测试覆盖能力和架构韧性。
+* **集成敏捷性**: 外部集成人员无须手动配置复杂的单例关系，只需一行 `services.AddUniCon()` 即可拉起全套高性能工业网关核心服务。
+* **配置与生命周期自治**: 从静态的配置硬编码演化为由 IoC 容器和北向 REST APIs 共同驱动的高容错、动态热插拔网关。
+
+---
+
+---
+url: /versions/kannb5oy/index.md
+---
+# UniCon 版本更新记录
+
+## \[v1.0.0] - 2026-05-16
+
+### 更新内容
+
+* **核心框架 (Core)**:
+  * 定义了统一驱动接口 `IUniconDriver` 及基础抽象类 `DriverBase`。
+  * 实现了 `ConnectionManager` 自动连接管理器，具备 5s 间隔的故障自愈与重连功能。
+  * 实现了 `JobManager` 任务调度引擎，支持基于时间间隔的异步数据采集与处理。
+  * 增加了 `NetworkHelper` 诊断工具，集成 Ping 和 TCP 端口连通性检查。
+* **协议驱动 (Drivers)**:
+  * **S7 Driver**: 基于 `S7netplus` 实现西门子 PLC 通讯。
+  * **OPC UA Driver**: 基于 `Workstation.UaClient` 实现，支持匿名登录及标准读写。
+  * **Modbus Driver**: 基于 `EasyModbus` 实现 TCP/RTU 寄存器读写。
+  * **MQTT Driver**: 基于 `MQTTnet 5.x` 实现高性能发布订阅。
+* **Web 服务 (Integration)**:
+  * 搭建 `UniCon.WebServer` (ASP.NET Core 10) 中心化服务。
+  * 提供 `CommunicationService` 作为业务枢纽，管理驱动、标签 (Tag) 与任务 (Job)。
+  * 暴露 REST API 接口用于逻辑标签的读写访问。
+  * 集成 Swagger UI 用于接口在线调试。
+
+### 与上一版本区别
+
+* **从 0 到 1 的飞跃**: 本版本为框架的首个完整实现版。
+* **由虚转实**: 将《架构技术规格书》中的文字定义转化为可编译、可运行的 .NET 10 工业物联网框架。
+* **插件化落地**: 建立了完整的驱动加载与管理模式，为后续扩展新协议奠定了基础。
+
+---
+
+---
+url: /versions/l0l3afex/index.md
+---
+# UniCon 版本更新记录
+
+## \[v1.2.0] - 2026-05-16
+
+### 更新内容
+
+* **任务管理系统重构 (Job Management)**:
+  * 移除了基础的 `JobManager`，全面集成高性能调度框架 **Quartz.NET**。
+  * 实现了 `JobScheduler` 包装类，支持 CRON 表达式调度。
+  * 新增内置任务类型：
+    * `HttpJob`: 支持自定义 URL 和 HTTP 方法的异步请求任务。
+    * `SystemCleanupJob`: 预留的系统缓存与资源清理任务接口。
+  * 支持通过依赖注入 (DI) 动态加载自定义任务类。
+* **集成优化**:
+  * 在 `UniCon.WebServer` 中配置了 Quartz 托管服务。
+  * 引入了 `IHttpClientFactory` 优化 HTTP 任务的性能与资源管理。
+* **测试增强**:
+  * 增加了 `JobSystemTests`，通过 Mock 技术验证了新任务系统的执行逻辑。
+
+### 与上一版本区别
+
+* **功能性**: 从简单的 `while` 循环调度升级为支持 CRON 表达式、持久化与复杂调度逻辑的专业级系统。
+* **扩展性**: 用户现在可以通过实现 `IJob` 接口或继承 `UniConJobBase` 轻松扩展自定义业务逻辑，而无需修改核心代码。
+* **健壮性**: 利用 Quartz.NET 成熟的任务生命周期管理，提升了任务执行的可靠性与可监控性。
+
+## \[v1.2.0 优化] - 2026-05-16
+
+### 架构精简与规范化 (Refinement)
+
+* **目录重构**: 将内置任务 (`HttpJob`, `SystemCleanupJob`) 迁移至 `BuiltIn` 子文件夹，每个任务独立文件，遵循 **单一职责原则 (RULE 2.1)**。
+* **消除魔法字符串**: 引入 `JobDataKeys` 常量类，所有任务参数传递均使用常量定义，遵循 **语义化开发 (RULE 1.1)**。
+* **代码拆分**: 将 `JobScheduler`、`UniConJobBase` 等核心组件从单一文件拆分为独立模块，提升了代码的可读性与维护性。
+
+---
+
+---
+url: /versions/lcimp9mb/index.md
+---
+# UniCon 版本更新记录
+
+## \[v1.6.0] - 2026-05-16
+
+### 更新内容
+
+* **自愈重连机制 (Autonomous Self-Healing)**:
+  * **Watchdog 模式**: 在 `DriverBase` 基类中内置了自研的 Watchdog 后台监控任务，驱动现在具备完全的自愈能力，不再依赖外部管理器的轮询。
+  * **指数退避算法 (Exponential Backoff)**: 针对断线重连引入了指数退避策略（1s, 2s, 4s... 最高 30s），有效防止由于服务端故障引起的网络风暴。
+  * **重连排队锁 (Reconnection Lock)**: 引入 `_connectionLock`。在重连期间，所有并发请求将安全排队，确保同一时刻只有一个物理连接尝试，避免资源竞争。
+  * **离线短路机制 (Short-circuiting)**: 当驱动处于非连接状态时，IO 请求将立即返回 `503 Offline` 响应，不再占用线程进行无效的底层超时等待。
+* **架构模板模式优化**:
+  * 引入了 `OnConnect/OnDisconnect` 钩子方法。子类只需实现具体的协议握手逻辑，而状态流转、并发控制与自愈调度由基类统一托管。
+* **基础设施优化**:
+  * 简化了 `ConnectionManager`，其职责转变为驱动的初始注册与生命周期启动器。
+
+### 与上一版本区别
+
+* **独立性**: 每个驱动现在都是一个独立的自愈单元，即使没有外部管理器，也能保证连接的稳定性。
+* **性能响应**: 解决了网络波动期间线程池被挂起的 IO 操作耗尽的问题。
+* **扩展便利性**: 新协议驱动的开发量进一步减少，开发者只需关注报文，无需处理复杂的重连与并发逻辑。
+
+---
+
+---
+url: /versions/nc3jdcja/index.md
+---
+# v2.3.1 — 修复 CI/CD 自动打包与 NuGet 发布系统 (v2.3.1)
+
+**日期**：2026-05-19
+**类型**：Fix / CI-CD
+
+***
+
+## \[v2.3.1] - 2026-05-19
+
+### Fixed
+
+* **CI/CD Workflow Path**: Corrected the pack target path from `src` to `UniCon.slnx` solution file, resolving `MSB1003` errors.
+* **Workflow Build Step**: Added a `Build` compilation step under the `publish` job in `dotnet.yml` prior to the `Pack` step to ensure `bin/Release` artifacts exist when packing with `--no-build` on a fresh runner.
+
+### Key Changes
+
+* Modified `.github/workflows/dotnet.yml` to compile `UniCon.slnx` inside the `publish` job before executing `dotnet pack`.
+* Unified step numbering sequence from 1 to 6 in the `publish` job.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 修复 CI/CD 自动打包与 NuGet 发布
+
+### 🎯 最终目标
+
+* 修复 GitHub Actions 中的 `dotnet.yml` 配置文件，确保推送带 `[release]` 提交信息的 commit 到 `main` 时，能成功完成所有 C# 类库项目的构建、打包和发布至 NuGet。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] [dotnet.yml](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.github/workflows/dotnet.yml) (原因：修改打包路径，指定 UniCon.slnx 解决方案，并在打包前添加构建步骤以配合 --no-build 参数)
+* \[x] [v2.3.1.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/versions/v2.3.1.md) (原因：创建并记录版本变更)
+
+### 📝 Steps
+
+* \[x] Step 1: 创建版本文件并锁定上下文环境
+* \[x] Step 2: 修复 `.github/workflows/dotnet.yml` 工作流的构建和打包配置
+* \[x] Step 3: 完成验证并归档版本记录
+
+\------details end------
+
+---
+
+---
+url: /versions/q59q1w4p/index.md
+---
+# UniCon 版本更新记录
+
+## \[v1.3.0] - 2026-05-16
+
+### 更新内容
+
+* **内置任务增强 (Built-in Job Enhancements)**:
+  * **增强型 `HttpJob`**:
+    * 支持自定义 Headers (JSON 格式)。
+    * 支持 Query Parameters 自动拼接。
+    * 支持 Request Body 负载。
+    * 增加了容错机制，安全处理缺失的任务参数。
+  * **新增 `CommunicationJob`**:
+    * 实现了通用的工业通讯任务，支持对任何已注册驱动进行读/写操作。
+    * 支持动态指定数据类型 (`DataType`)。
+    * 允许在 Job 级别配置授权信息（通过 JobData 传递，驱动层处理）。
+* **架构升级**:
+  * 引入了 `IDriverRegistry` 驱动注册中心，实现了驱动实例在 Web 层、核心层与任务系统之间的共享。
+  * 优化了 `CommunicationService` 的初始化逻辑，统一驱动生命周期管理。
+* **鲁棒性提升**:
+  * 所有内置任务均增加了 `GetStringSafe` 校验，避免 Quartz `JobDataMap` 缺失键名导致的异常。
+
+### 与上一版本区别
+
+* **业务覆盖度**: `HttpJob` 现在可以满足复杂的 WebHook 和 REST API 调用需求，不再局限于简单的 GET 请求。
+* **闭环系统**: `CommunicationJob` 的引入使得 UniCon 真正实现了“采集-处理-反馈”的闭环，用户可以定时读取 PLC 数据并根据逻辑自动写入另一个终端。
+* **组件共享**: 解决了任务系统无法直接访问 Web 层初始化驱动的问题，架构更加清晰合理。
+
+---
+
+---
+url: /versions/qlt9touk/index.md
+---
+# UniCon 版本更新记录
+
+## \[v1.9.0] - 2026-05-17
+
+### 变更类型
+
+* **Feature (新功能)**: 统一主动轮询订阅引擎 (Active Polling Subscription)、自适应值变化检测 (Change Detection) 与可插拔分布式缓存提供者 (IUniconCacheProvider)。
+* **Feature (新功能)**: 支持基于 Key-Value 模式的 OPC UA 复杂安全连接配置（匿名登录、账户密码、X.509 证书及安全加密策略）。
+
+### 更新内容
+
+* **主动轮询订阅机制 (Active Polling Engine)**:
+  * 针对 S7、Modbus 等南向无发布订阅机制的底层工控协议，在 `DriverBase` 层统一实现后台主动轮询订阅引擎。
+  * 通过 Task 独立微线程安全地并发执行，支持独立的 Scan Rate，不阻塞主线程。
+* **扫描推送双模式 (UniconScanMode)**:
+  * **Exception-Based (变更推送)**: 默认且最优模式。周期轮询物理寄存器，但仅在实际数值或质量戳发生改变时才更新缓存、触发通知。
+  * **Polled (周期刷屏)**: 满足必须周期下发的特殊场景，不论数值是否变化均每周期强制触发通知。
+* **可插拔分布式缓存机制 (IUniconCacheProvider)**:
+  * 定义了统一的 `IUniconCacheProvider` 分布式/本地缓存接口，彻底解耦工控网关缓存介质。
+  * 提供了内置的 `MemoryCacheProvider` 做为默认高并发进程内缓存。
+  * 提供了对 `RedisCacheProviderPlaceholder` 的完美架构兼容与 fallback 平滑回退机制，支持零缝隙替换为 Redis。
+* **生命周期安全防护 (GC Safeguard)**:
+  * 在 `DriverBase` 中设计了完备的垃圾回收析构函数心跳清理 (`~DriverBase`) 与主动平滑卸载功能，彻底杜绝背景 Polling Tasks 内存/线程泄漏。
+* **服务网关深度集成**:
+  * `CommunicationService` 构造函数中全面注入 `IUniconCacheProvider` 并桥接静态 `DriverBase.CacheProvider`，确保新实例化驱动 100% 自动继承缓存介质。
+  * 重构 `CommunicationService` 的 HTTP 数据查询接口为 `Task`-based 异步操作，解耦数据存储通道。
+* **OPC UA 复杂物理连接加密集成 (Scenario 2 & Security)**:
+  * 在 `OpcUaDriver` 中实现自适应 `OpcUaConnectionOptions` 解析器，支持常规 Endpoint URL 格式（兼容老版本）与分号分隔的 Key-Value 参数连接字符串格式。
+  * 引入了 BouncyCastle 的 `X509CertificateParser` 与 `PemReader`，支持无缝加载 DER 证书与 PEM 密钥文件，满足高安全级别的 X.509 客户端证书证书链握手安全策略。
+  * 动态集成匿名（`Anonymous`）、账户密码（`UserNameIdentity`）及安全配置策略（`Basic256Sha256`组件、`Basic128Rsa15`、`None` 等）。
+* **南向多协议驱动通讯参数全方位升级与自愈保障 (Feature/Config)**:
+  * 针对 `S7Driver`、`ModbusDriver`、`MqttDriver` 全方位补全了缺失的生产级通讯参数，摆脱硬编码并赋予用户完全的连接掌控力：
+    * `S7Driver`: 支持解析并直接配置底层 `Plc` 的 `Timeout` / `ReadTimeout` / `WriteTimeout` 通讯套接字超时。
+    * `ModbusDriver`: 支持配置 `unitid` / `slaveid` (从站标识符) 以及 `timeout` / `connectiontimeout` (连接超时)。
+    * `MqttDriver`: 完美融合最新 MQTTnet 5.x 体系，全面支持 `server`/`host`, `port`, `clientid`, `username`/`user`, `password`/`pwd`, `cleansession`, `keepalive` 以及 SSL/TLS 安全连接的 `.WithTlsOptions` 配置。
+  * **文档规范对齐**: 同步重写并补齐了 `/docs/3. drivers/` 下对应 S7、Modbus、MQTT 驱动的参数表与用法示例，保障项目架构文档 100% 完整与一致。
+* **高并发主动订阅调度引擎升级 (Architecture & Concurrency)**:
+  * **结构化订阅模型与生命周期管控 (`UniconSubscription`)**:
+    * 设计并实现结构化订阅模型，支持每个订阅项携带唯一 `Id`、特定的 `ScanRateMs` (扫描频率)、`ScanMode` (推/拉模式) 与各自的 `Callback`，摆脱了原先仅能单一地址监控且无法独立卸载的缺陷。
+    * 在 `IUniconDriver` 和 `DriverBase` 中追加了基于订阅 ID 取消注册的 `UnsubscribeByIdAsync`，以及查询当前活动监控项的 `GetSubscriptions()`。
+  * **集中化轮询调度器 (Central Polling Coordinator)**:
+    * 针对成百上千点位高并发订阅场景下的 CPU 线程切换与 PLC 总线风暴问题，彻底弃用“一地址一微线程 (Task)”的低效方案。
+    * 引入了单驱动共享的主调度器 `RunSchedulerLoopAsync`，通过高精度 Tick 轮询识别出期满 (Due) 的订阅列表，自动对同一地址的订阅进行去重与聚合。
+    * 调用统一的 `ReadBatchAsync` 执行批量读取，实现单次查询物理总线后批量分发回调，将上下文切换和网络开销降低数个数量级。
+    * 调度器的生命周期完全与物理驱动的连接状态 (Connect / Disconnect) 绑定，不产生任何后台悬挂或资源泄漏。
+  * **测试覆盖升级**:
+    * 新增 [SubscriptionSchedulerTests.cs](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/tests/UniCon.Tests/SubscriptionSchedulerTests.cs)，深度覆盖了集中化调度器批量请求分组、变更异常检测通知、以及多路订阅注销的正确性，保障系统自愈和通讯内核品质。
+
+---
+
+---
+url: /versions/rjk4fxtl/index.md
+---
+# v2.2.0 — 驱动连接自愈与网络韧性增强
+
+**日期**：2026-05-18
+**类型**：Feature / Architecture / Resilience
+
+***
+
+## 变更概述
+
+针对工业通讯网关在恶劣网络环境（如切换 WIFI、短暂断网、网线松动等）下的稳定性要求，本次更新对 UniCon 驱动系统进行了连接自愈与网络韧性的深度升级：
+
+1. **全局网络状态监控 (INetworkMonitor)**：引入硬件级网络状态变更感知，规避套接字断开事件的“虚假存活”迟滞。
+2. **底层事件驱动断线感知**：各协议驱动全面挂载底层客户端事件（MQTT Disconnected, OPC UA Faulted/Closed 等），从“轮询心跳检测”升级为“主动事件触发”的毫秒级故障响应。
+3. **故障自愈 Watchdog 智能流控**：结合网络可用性，在断网时智能挂起重连定时器，降低 CPU 开销，并在网络恢复瞬间实现毫秒级自动重连自愈。
+4. **全套接字异常防护降级**：S7 和 Modbus 等传统无事件协议，在传输层捕获 any I/O 或套接字异常时即刻驱动状态机流转为 Faulted。
+
+***
+
+## \[v2.2.0] - 2026-05-18
+
+### Added / Changed / Fixed
+
+* **INetworkMonitor & NetworkMonitor**: Added cross-platform system-level network status monitoring leveraging .NET's `NetworkChange` API.
+* **DriverBase Self-Healing Watchdog**: Upgraded base driver class to reactively pause reconnection schedules under a network outage and immediately resume/wakeup on network restoration.
+* **MqttDriver**: Integrated reactive connection monitoring by hooking the underlying client's `DisconnectedAsync` event.
+* **OpcUaDriver**: Integrated `CommunicationState` transition checks and hooked Session `Faulted`/`Closed` channels to instantly transit driver to `Faulted` state.
+* **OpcUaPubSubDriver**: Added `ConnectionLost` events to transport layers (`MqttPubSubTransport` and `UdpPubSubTransport`) to instantly react to protocol/socket exceptions.
+* **S7Driver & ModbusDriver**: Instrumented read, write, and batch communication scopes to transition the driver state to `Faulted` immediately upon physical client/socket loss.
+* **Resilience Tests**: Implemented a comprehensive suite of unit tests in `ResilienceTests.cs` validating network-down pausing and network-restored instant wakeup behaviors.
+
+### Key Changes
+
+* Reduced reconnect recovery latency under restored networking to milliseconds.
+* Reduced host machine CPU, socket port, and network thrashing during extended outages via passive pause mechanism.
+* Handled all event subscriptions cleanly in `Dispose` scopes to prevent memory leaks.
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 驱动连接自愈与网络韧性升级
+
+### 🎯 最终目标
+
+* 实现全局网络状态感知并深度整合至所有驱动中，使驱动能够监听物理和协议客户端事件（Mqtt, OpcUa, Modbus, S7, OpcUaPubSub），保障在断网/网络切换时的秒级故障自愈，且在断网期间挂起重连以免资源浪费。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] docs/3. drivers/connection-and-network-resilience.md (原因：详细规划自愈与网络健康逻辑架构)
+* \[x] src/UniCon.Core/Network/INetworkMonitor.cs (原因：定义全局网络监控接口)
+* \[x] src/UniCon.Core/Network/NetworkMonitor.cs (原因：利用 NetworkChange 提供高精度硬件网络状态)
+* \[x] src/UniCon.Core/ServiceCollectionExtensions.cs (原因：注册 INetworkMonitor 依赖注入)
+* \[x] src/UniCon.Core/DriverBase.cs (原因：重构自愈 Watchdog 精准调度)
+* \[x] src/UniCon.Drivers.Modbus/ModbusDriver.cs (原因：重写 Ping 并在通信异常时过渡到 Faulted)
+* \[x] src/UniCon.Drivers.Mqtt/MqttDriver.cs (原因：通过底层 DisconnectedAsync 主动自愈)
+* \[x] src/UniCon.Drivers.OpcUa/OpcUaDriver.cs (原因：监听 channel 故障并在通信故障时主动过渡)
+* \[x] src/UniCon.Drivers.S7/S7Driver.cs (原因：拦截读写和批量读写异常过渡到 Faulted)
+* \[x] src/UniCon.Drivers.OpcUaPubSub/Transports/IPubSubTransport.cs (原因：新增 ConnectionLost 传输层规范)
+* \[x] src/UniCon.Drivers.OpcUaPubSub/Transports/MqttPubSubTransport.cs (原因：下发 MQTT 连接丧失状态)
+* \[x] src/UniCon.Drivers.OpcUaPubSub/Transports/UdpPubSubTransport.cs (原因：捕获 UDP 套接字接收环异常)
+* \[x] src/UniCon.Drivers.OpcUaPubSub/OpcUaPubSubDriver.cs (原因：整合传输层 ConnectionLost 事件通知)
+* \[x] tests/UniCon.Tests/ResilienceTests.cs (原因：编写高质量的自愈逻辑单元测试)
+* \[x] docs/3. drivers/1.intro.md (原因：补全自愈与 INetworkMonitor 的设计介绍文档)
+
+### 📝 Steps
+
+* \[x] Step 1: 编写设计文档 `connection-and-network-resilience.md` 并获得架构师确认。
+* \[x] Step 2: 实现 `INetworkMonitor` 及其基于 `NetworkChange` 的系统级网络检测实现。
+* \[x] Step 3: 在 `ServiceCollectionExtensions.cs` 中向 IoC 注册 `INetworkMonitor`，并将其注入 `DriverBase.cs`。
+* \[x] Step 4: 重构 `DriverBase.cs` 的重连自愈 Watchdog 逻辑，当网络不可用时挂起重连线程，在网络恢复时即刻触发自愈重连。
+* \[x] Step 5: 为 `IPubSubTransport` 扩展 `ConnectionLost` 事件，并在 `MqttPubSubTransport` 和 `UdpPubSubTransport` 中实现。
+* \[x] Step 6: 逐一重构 5 大驱动，在连接建立时挂载各底层连接/通道/传输事件，并在事件触发或读写 I/O 抛出异常时令 `State = DriverState.Faulted`。
+* \[x] Step 7: 编写 `ResilienceTests.cs` 单元测试，并在本地运行 `dotnet test` 及 `dotnet format` 以确保质量门禁完全通过。
+* \[x] Step 8: 更新版本日志并结项归档。
+
+\------details end------
+
+---
+
+---
+url: /versions/rym0gon5/index.md
+---
+# v2.0.0 — DriverBase 深度重构：扫描调度架构全面升级
+
+**日期**：2026-05-18
+**类型**：Refactor / Architecture
+
+***
+
+## 变更概述
+
+对 `DriverBase` 进行全面拆分与重构，从"职责过重的单体基类"演进为"轻量协调层 + 独立基础设施组件"架构。
+
+***
+
+## 新增文件
+
+| 文件 | 职责 |
+|------|------|
+| `Scanning/IScanStrategy.cs` | 扫描策略接口，替代 `if(ScanMode == ...)` 分支 |
+| `Scanning/PolledScanStrategy.cs` | 周期全量通知策略 |
+| `Scanning/ExceptionBasedScanStrategy.cs` | 变化通知策略，支持死区过滤 |
+| `Scanning/TagEntry.cs` | 单地址采集单元，持有缓存值与多回调 |
+| `Scanning/ScanGroup.cs` | 以 ScanRate 为粒度的扫描组，持有 LastPolledTime |
+| `Scanning/ScanGroupRegistry.cs` | ScanGroup 注册表，注册时完成地址去重 |
+| `Scanning/ScanScheduler.cs` | 基于最小等待时间调度，替代 while(true)+Delay(50) |
+| `Notification/NotificationEnvelope.cs` | 通知载体 record |
+| `Notification/NotificationDispatcher.cs` | Channel\&lt;T\&gt; 异步分发器，独立线程消费，Callback 异常隔离 |
+| `Transport/ITransport.cs` | 传输层抽象，支持并发读/独占写 |
+| `Models/QualityCode.cs` | OPC UA 兼容质量码枚举 |
+| `Models/TagMetadata.cs` | Tag 元数据（类型/权限/单位/缩放/死区） |
+| `Models/ScanStatistics.cs` | Interlocked 无锁运行统计 |
+
+***
+
+## 核心变更点（与 v1.9.0 的差异）
+
+### DriverBase
+
+* 构造函数增加 `IUniconCacheProvider cacheProvider`（DI 注入，移除 `static CacheProvider`）
+* `State` setter 改为 `protected`，通过 `Interlocked.Exchange` 保证原子性，并触发 `StateChanged` 事件
+* 移除全局 `_syncLock`（锁下沉到 Transport 层，读写分离）
+* 移除 `~DriverBase()` Finalizer，改用标准 `virtual void Dispose(bool)` 模式
+* `StopScheduler` 改为完全异步 `StopSchedulerAsync()`，消除 `.Wait(500)` 阻塞
+* 订阅注册时直接分组到 `ScanGroupRegistry`，零运行时 LINQ
+
+### UniconSubscription
+
+* Callback 从 Action\&lt;DataValue\&lt;object\&gt;\&gt; 改为 Func\&lt;DataValue\&lt;object\&gt;, Task\&gt;
+* 新增 `MaxQueueLength`、`OverflowPolicy`、`TagMetadata` 字段
+* 移除 `LastPolledTime`（迁移至 `ScanGroup`）
+
+### DataValue\&lt;T\&gt;
+
+* 新增 `ServerTimestamp`（网关到达时间戳）
+* 新增 `QualityCode Quality`（OPC UA 兼容质量码）
+
+### IUniconDriver
+
+* SubscribeAsync callback 升级为 Func\&lt;DataValue\&lt;object\&gt;, Task\&gt;
+* 新增 `StateChanged` 事件
+* 新增 `GetStatistics(scanRateMs, scanMode)` 接口
+
+### 所有 Driver 子类
+
+* 构造函数统一增加 `IUniconCacheProvider cacheProvider`
+* `Dispose()` 改为 `override`，调用 `base.Dispose()`
+* `MqttDriver` / `OpcUaPubSubDriver` 订阅回调更新为异步 Func
+* `S7Driver` 重写了 `ReadBatchAsync` 与 `WriteBatchAsync`，采用 S7.Net 原生批量 API，支持 PDU 自动切片并具备单点失败退避到单个读写的能力
+
+### CommunicationService
+
+* 移除 `DriverBase.CacheProvider = cacheProvider`（静态绑定废除）
+* 驱动工厂统一传入 `_cacheProvider`
+* `SubscribeAsync` 回调改为 `async dataValue => await _cacheProvider.SetAsync(...)`
+
+***
+
+## 关键架构改进对照
+
+| 旧行为 | 新行为 |
+|--------|--------|
+| `while(true) + Delay(50)` 全量扫描 | 最小等待时间调度，仅调度到期 ScanGroup |
+| 运行时 `GroupBy(address)` | 注册时 `ScanGroupRegistry` 预分组 |
+| `sub.Callback(value)` 同步调用 | Channel\&lt;T\&gt; 投递，独立线程异步消费 |
+| `CacheCompare` 在 Subscription 层 | `CacheCompare` 在 `TagEntry` 层 |
+| `static CacheProvider` | 构造函数 DI 注入 |
+| `_syncLock` 全局粗粒度锁 | 锁下沉至 Transport（`ITransport` 抽象） |
+| `Task.Wait(500)` 停止调度器 | `await _scheduler.DisposeAsync()` 全异步 |
+| `~DriverBase()` Finalizer | `virtual Dispose(bool)` 标准模式 |
+| `ScanMode if/else` | `IScanStrategy` 策略模式 |
+
+## \[v2.0.1] - 2026-05-18
+
+### Added / Changed / Fixed
+
+* \[Added] `S7Driver` 原生批量读取 (`ReadBatchAsync`) 与批量写入 (`WriteBatchAsync`) 支持。
+
+### Key Changes
+
+* 使用 `S7.Net` 原生的 `ReadMultipleVarsAsync` 和 `WriteAsync(DataItem[])` 提高批量通信效率。
+* 设计了基于 19 (读) / 10 (写) 大小的 PDU 安全切片分组，防止超出西门子协议 PDU 大小限制。
+* 引入健全的容灾退避机制：若整体批量写入/读取因地址解析或 PLC 内部错误失败，自动无缝降级退避至单个读写模式，保证其他正常变量通信不受单点错误影响。
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: S7Driver 批量读写原生实现
+
+### 🎯 最终目标
+
+* 在 `S7Driver` 中重写 `ReadBatchAsync` 和 `WriteBatchAsync`，使用 S7.Net 原生的批量操作 API，提升读写效率，不再依赖 `DriverBase` 默认的暴力循环。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] src/UniCon.Drivers.S7/S7Driver.cs（重写批量读写方法）
+
+### 📝 Steps
+
+* \[x] Step 1: 在 `S7Driver` 中重写 `ReadBatchAsync` 方法，支持将多个请求转换为批量读操作并调用。
+* \[x] Step 2: 在 `S7Driver` 中重写 `WriteBatchAsync` 方法，支持将多个写入请求转换为批量写操作并调用。
+
+\------details end------
+
+---
+
+---
+url: /versions/v2.3.10/index.md
+---
+# v2.3.10 — Translation of Core Documents (v2.3.10)
+
+**Date**: 2026-05-23
+**Type**: Documentation
+
+***
+
+## \[v2.3.10] - 2026-05-23
+
+### Added
+
+* \[ ] English translations for active-polling-subscription.md, driver-architecture-v2.md, IUniconDriver.md, MemoryCacheProvider.md, RedisCacheProviderPlaceholder.md, IDriverRegistry.md under `.vuepress_docs/docs/en/docs/2. core/`.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: Core Documents Translation
+
+### 🎯 最终目标
+
+* 翻译 6 个核心中文文档并生成对应的英文文档在 `.vuepress_docs/docs/en/docs/2. core/` 目录下。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[ ] .vuepress\_docs/docs/en/docs/2. core/6.active-polling-subscription.md (原因：新翻译文档)
+* \[ ] .vuepress\_docs/docs/en/docs/2. core/7.driver-architecture-v2.md (原因：新翻译文档)
+* \[ ] .vuepress\_docs/docs/en/docs/2. core/8.IUniconDriver.md (原因：新翻译文档)
+* \[ ] .vuepress\_docs/docs/en/docs/2. core/8.MemoryCacheProvider.md (原因：新翻译文档)
+* \[ ] .vuepress\_docs/docs/en/docs/2. core/9.RedisCacheProviderPlaceholder.md (原因：新翻译文档)
+* \[ ] .vuepress\_docs/docs/en/docs/2. core/10.IDriverRegistry.md (原因：新翻译文档)
+
+### 📝 Steps
+
+* \[ ] Step 1: 翻译 6.active-polling-subscription.md
+* \[ ] Step 2: 翻译 7.driver-architecture-v2.md
+* \[ ] Step 3: 翻译 8.IUniconDriver.md
+* \[ ] Step 4: 翻译 8.MemoryCacheProvider.md
+* \[ ] Step 5: 翻译 9.RedisCacheProviderPlaceholder.md
+* \[ ] Step 6: 翻译 10.IDriverRegistry.md
+* \[ ] Step 7: 校验翻译并在版本文件中归档为 Release
+  \------details end------
+
+---
+
+---
+url: /versions/v2.3.11/index.md
+---
+# v2.3.11 — Translation of Web API Documents (v2.3.11)
+
+**Date**: 2026-05-23
+**Type**: Documentation
+
+***
+
+## \[v2.3.11] - 2026-05-23
+
+### Added
+
+* \[x] English translation for 1.intro.md under `.vuepress_docs/docs/en/docs/5. webapi/`.
+* \[ ] English translation for 2.driver-endpoints.md under `.vuepress_docs/docs/en/docs/5. webapi/`.
+* \[ ] English translation for 2.tag-endpoints.md under `.vuepress_docs/docs/en/docs/5. webapi/`.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: Web API Documents Translation
+
+### 🎯 最终目标
+
+* 翻译 3 个 Web API 中文文档并生成对应的英文文档在 `.vuepress_docs/docs/en/docs/5. webapi/` 目录下。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] .vuepress\_docs/docs/en/docs/5. webapi/1.intro.md (原因：新翻译文档)
+* \[ ] .vuepress\_docs/docs/en/docs/5. webapi/2.driver-endpoints.md (原因：新翻译文档)
+* \[ ] .vuepress\_docs/docs/en/docs/5. webapi/2.tag-endpoints.md (原因：新翻译文档)
+
+### 📝 Steps
+
+* \[x] Step 1: 翻译 1.intro.md 并保存到 .vuepress\_docs/docs/en/docs/5. webapi/1.intro.md
+* \[ ] Step 2: 翻译 2.driver-endpoints.md 并保存到 .vuepress\_docs/docs/en/docs/5. webapi/2.driver-endpoints.md
+* \[ ] Step 3: 翻译 2.tag-endpoints.md 并保存到 .vuepress\_docs/docs/en/docs/5. webapi/2.tag-endpoints.md
+* \[ ] Step 4: 验证翻译并在版本文件中归档为 Release
+  \------details end------
+
+---
+
+---
+url: /versions/v2.3.2/index.md
+---
+# v2.3.2 — 修复 VuePress 文档构建编译错误 (v2.3.2)
+
+**日期**：2026-05-23
+**类型**：Fix / Docs
+
+***
+
+## \[v2.3.2] - 2026-05-23
+
+### Fixed
+
+* **VuePress Compiling**: Fixed HTML tag tokenization and parsing syntax errors caused by C# generic parameters (such as `DataValue<object>`, `DataValue<T>`, `Channel<T>`) in markdown files by converting them to double-escaped HTML entities with standard `<code>` blocks, completely bypassing the Vue template compiler's element parsing rules.
+
+### Key Changes
+
+* Modified `.vuepress_docs/docs/versions/v2.0.0.md` to escape C# generics in inline text and code.
+* Modified `.vuepress_docs/docs/docs/5. webapi/2.driver-endpoints.md` to escape C# generics.
+* Modified `.vuepress_docs/docs/docs/3. drivers/2.opcua-pubsub.md` to escape C# generics.
+* Modified `.vuepress_docs/docs/docs/2. core/7.driver-architecture-v2.md` to escape C# generics.
+* Modified `.vuepress_docs/docs/docs/2. core/6.active-polling-subscription.md` to escape C# generics.
+* Modified `.vuepress_docs/docs/docs/2. core/1.intro.md` to escape C# generics.
+* Modified `.vuepress_docs/docs/versions/v1.5.0.md` to escape C# generics.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 修复 VuePress 文档构建编译错误
+
+### 🎯 最终目标
+
+* 修复 `v2.0.0.md` 及其他 Markdown 文件中由于 C# 泛型参数 `<object>` 导致 VuePress (Vite/Vue) 编译报错 "Element is missing end tag" 的问题。
+* 确保 `pnpm docs:build` 成功通过。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] [v2.3.2.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v2.3.2.md) (原因：创建版本记录文件)
+* \[x] [v2.0.0.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v2.0.0.md) (原因：修复 line 31, 50, 54, 59, 82 中的 `<object>` / `<T>` 标签解析错误)
+* \[x] [6.active-polling-subscription.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/docs/2.%20core/6.active-polling-subscription.md) (原因：修复潜在的 `<object>` 解析错误)
+* \[x] [2.opcua-pubsub.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/docs/3.%20drivers/2.opcua-pubsub.md) (原因 ：修复潜在的 `<object>` 解析错误)
+* \[x] [2.driver-endpoints.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/docs/5.%20webapi/2.driver-endpoints.md) (原因：修复潜在的 `<object>` 解析错误)
+* \[x] [7.driver-architecture-v2.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/docs/2.%20core/7.driver-architecture-v2.md) (原因：修复潜在的 `<object>` 解析错误)
+* \[x] [1.intro.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/docs/2.%20core/1.intro.md) (原因：修复潜在的 `<T>` 解析错误)
+* \[x] [v1.5.0.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v1.5.0.md) (原因：修复潜在的 `<T>` 解析错误)
+
+### 📝 Steps
+
+* \[x] Step 1: 创建 `v2.3.2.md` 版本记录文件并锁定上下文。
+* \[x] Step 2: 修复 `v2.0.0.md` 中导致编译失败的 `<object>` 泛型语法。
+* \[x] Step 3: 检查并修复其他可能受影响的 `.md` 文档中的 `<object>` / `<T>` 泛型语法。
+* \[x] Step 4: 运行 `pnpm docs:build` 验证文档构建是否成功通过。
+* \[x] Step 5: 更新 `v2.3.2.md` 状态并归档。
+
+\------details end------
+
+---
+
+---
+url: /versions/v2.3.3/index.md
+---
+# v2.3.3 — 修复 GitHub Actions 部署工作流工作目录配置 (v2.3.3)
+
+**日期**：2026-05-23
+**类型**：Fix / CI/CD
+
+***
+
+## \[v2.3.3] - 2026-05-23
+
+### Fixed
+
+* **CI/CD Workflow**: Fixed the VuePress automatic deployment working directory in GitHub Actions by setting `working-directory: .vuepress_docs` for dependencies installation and build steps, updating the deployment build directory to `.vuepress_docs/docs/.vuepress/dist`, and explicitly specifying the pnpm version `11.1.3` in `pnpm/action-setup` to avoid detection failures in subdirectories.
+
+### Key Changes
+
+* Modified `.github/workflows/deploy.yml` to specify working directory, build output directory, and explicit pnpm version.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 修复 GitHub Actions 部署工作流工作目录配置
+
+### 🎯 最终目标
+
+* 修复 `.github/workflows/deploy.yml` 构建并部署步骤，使其在正确的 `.vuepress_docs` 目录下进行，并成功将打包产物推送到 `gh-pages` 分支。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] [.vuepress\_docs/docs/versions/v2.3.3.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v2.3.3.md) (原因：创建并更新版本记录文件)
+* \[x] [.github/workflows/deploy.yml](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.github/workflows/deploy.yml) (原因：修改工作流执行目录及发布目录配置，指定 pnpm 版本)
+
+### 📝 Steps
+
+* \[x] Step 1: 创建 `v2.3.3.md` 并锁定上下文
+* \[x] Step 2: 修改 `.github/workflows/deploy.yml` 工作目录和发布目录配置
+* \[x] Step 3: 在 `pnpm/action-setup` 中显式指定 `version: 11.1.3` 解决找不到 packageManager 问题
+* \[x] Step 4: 更新 Task Board 状态并归档
+
+\------details end------
+
+---
+
+---
+url: /versions/v2.3.4/index.md
+---
+# v2.3.4 — 优化项目根目录 README.md 说明文档 (v2.3.4)
+
+**日期**：2026-05-23
+**类型**：Docs
+
+***
+
+## \[v2.3.4] - 2026-05-23
+
+### Added / Changed
+
+* **Documentation**: Completely refactored and optimized the main `README.md` at the project's root with a premium layout, beautiful SVG badges, architectural description, technology stack table, standard cross-platform environmental setup, a clean .NET 10 async S7 subscription code sample, an elegant folder structure map, contribution rules, and MIT license details.
+
+### Key Changes
+
+* Redesigned `README.md` using professional markdown styling and clear visual hierarchies.
+* Added comprehensive instructions for new contributors, including clean coding expectations and local setup commands.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 优化项目根目录 README.md 说明文档
+
+### 🎯 最终目标
+
+* 重构并美化项目根目录下的 `README.md`，使其结构优美、视觉高端、信息清晰且符合顶尖开源项目门面标准。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] [README.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/README.md) (原因：重构项目主说明文档)
+* \[x] [.vuepress\_docs/docs/versions/v2.3.4.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v2.3.4.md) (原因：创建并管理版本记录文件)
+
+### 📝 Steps
+
+* \[x] Step 1: 创建 `v2.3.4.md` 并锁定上下文与 Task Board
+* \[x] Step 2: 重新设计并替换项目根目录的 `README.md`，融入精致的排版设计和高价值的技术栈介绍
+* \[x] Step 3: 更新 Task Board 并归档为 Release 记录
+
+\------details end------
+
+---
+
+---
+url: /versions/v2.3.5/index.md
+---
+# v2.3.5 — 优化并更新 VuePress 文档中英文首页 (v2.3.5)
+
+**日期**：2026-05-23
+**类型**：Docs
+
+***
+
+## \[v2.3.5] - 2026-05-23
+
+### Added / Changed
+
+* **Documentation**: Updated the Chinese homepage `.vuepress_docs/docs/README.md` and English homepage `.vuepress_docs/docs/en/README.md` of the VuePress documentation site, incorporating the core highlights and unified branding of UniCon matching the main `README.md` specifications.
+
+### Key Changes
+
+* Restructured VuePress homepage hero banners and feature sections in both Chinese and English locales.
+* Updated links to point to the correct documentation sections, changelog versions, and the GitHub repository.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 优化并更新 VuePress 文档中英文首页
+
+### 🎯 最终目标
+
+* 更新 VuePress 的中英文首页，展示统一的 UniCon 主题及 6 大核心亮点，排版美观大气。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] [.vuepress\_docs/docs/README.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/README.md) (原因：更新中文 VuePress 首页配置)
+* \[x] [.vuepress\_docs/docs/en/README.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/en/README.md) (原因：更新英文 VuePress 首页配置)
+* \[x] [.vuepress\_docs/docs/versions/v2.3.5.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v2.3.5.md) (原因：创建并管理版本记录文件)
+
+### 📝 Steps
+
+* \[x] Step 1: 创建 `v2.3.5.md` 并锁定上下文与 Task Board
+* \[x] Step 2: 重新设计并更新中文首页 `.vuepress_docs/docs/README.md`
+* \[x] Step 3: 重新设计并更新英文首页 `.vuepress_docs/docs/en/README.md`
+* \[x] Step 4: 更新 Task Board 并归档为 Release 记录
+
+\------details end------
+
+---
+
+---
+url: /versions/v2.3.6/index.md
+---
+# v2.3.6 — 补充 NuGet 模块化安装指南说明 (v2.3.6)
+
+**日期**：2026-05-23
+**类型**：Docs
+
+***
+
+## \[v2.3.6] - 2026-05-23
+
+### Added / Changed
+
+* **Documentation**: Added explicit installation guidelines for the modularized NuGet packages. Answered the modular dependency installation question (clarified that users only need to install `UniCon.Core` and the specific driver package(s) they need, rather than installing everything) and provided full setup snippets in `README.md` and user guide `.vuepress_docs/docs/docs/1. introduce/2.usage.md`.
+
+### Key Changes
+
+* Updated root `README.md` and `2.usage.md` with package manager console commands, CLI commands, and a clear explanation of modular plugin-based package installation.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 补充 NuGet 模块化安装指南说明
+
+### 🎯 最终目标
+
+* 在 `README.md` 和 `.vuepress_docs/docs/docs/1. introduce/2.usage.md` 中增加关于 NuGet 模块化依赖安装的详细解答与安装指令（Package Manager, dotnet CLI）。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] [README.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/README.md) (原因：更新根目录 README 中的安装步骤与模块化安装说明)
+* \[x] [.vuepress\_docs/docs/docs/1. introduce/2.usage.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/docs/1.%20introduce/2.usage.md) (原因：更新快速入门中的依赖安装机制说明)
+* \[x] [.vuepress\_docs/docs/versions/v2.3.6.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v2.3.6.md) (原因：创建并管理版本记录文件)
+
+### 📝 Steps
+
+* \[x] Step 1: 创建 `v2.3.6.md` 并锁定上下文与 Task Board
+* \[x] Step 2: 更新 `README.md`，添加模块化安装机制解答与 NuGet 控制台等命令
+* \[x] Step 3: 更新 `.vuepress_docs/docs/docs/1. introduce/2.usage.md`，添加模块化安装机制解答与多场景命令
+* \[x] Step 4: 更新 Task Board 并归档为 Release 记录
+
+\------details end------
+
+---
+
+---
+url: /versions/v2.3.7/index.md
+---
+# v2.3.7 — 配置 NuGet 打包属性与 README 支持 (v2.3.7)
+
+**日期**：2026-05-23
+**类型**：CI/CD / MSBuild
+
+***
+
+## \[v2.3.7] - 2026-05-23
+
+### Added / Changed
+
+* **MSBuild / NuGet**: Created a global `Directory.Build.props` configuration at the repository root to automatically inject authors, email, website url metadata, and the root `README.md` file as the official NuGet Package README into all packaged library assemblies when executing `dotnet pack`.
+* **Project Configuration**: Added `<IsPackable>false</IsPackable>` to `UniCon.WebServer.csproj` to prevent executable servers from being incorrectly packaged as NuGet libraries.
+
+### Key Changes
+
+* Created `Directory.Build.props` with metadata fields (`entity-now`, `entity_now@qq.com`, `https://unicon.rdr2.cn`).
+* Configured MSBuild to embed the root `README.md` in every generated `.nupkg` package.
+* Disabled packaging for the web service host.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 配置 NuGet 打包属性与 README 支持
+
+### 🎯 最终目标
+
+* 在所有打包的 NuGet 类库项目中，自动注入指定的作者、邮箱、官网元数据，并集成项目主 `README.md` 作为 NuGet 展示首页。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] [Directory.Build.props](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/Directory.Build.props) (原因：新建全局 MSBuild 属性配置，统筹元数据与 README 打包)
+* \[x] [src/UniCon.WebServer/UniCon.WebServer.csproj](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/src/UniCon.WebServer/UniCon.WebServer.csproj) (原因：禁用表现层 Web 服务类库打包)
+* \[x] [.vuepress\_docs/docs/versions/v2.3.7.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v2.3.7.md) (原因：创建并管理版本记录文件)
+
+### 📝 Steps
+
+* \[x] Step 1: 创建 `v2.3.7.md` 并锁定上下文与 Task Board
+* \[x] Step 2: 创建全局 `Directory.Build.props`，定义作者、邮箱、项目 URL 以及集成 `README.md` 的 MSBuild 属性
+* \[x] Step 3: 更新 `UniCon.WebServer.csproj`，显示设置 `<IsPackable>false</IsPackable>`
+* \[x] Step 4: 更新 Task Board 并归档为 Release 记录
+
+\------details end------
+
+---
+
+---
+url: /versions/v2.3.8/index.md
+---
+# v2.3.8 — 配置 GitHub Actions 自动通过 Git Tag 发布 NuGet 包 (v2.3.8)
+
+**日期**：2026-05-23
+**类型**：CI/CD
+
+***
+
+## \[v2.3.8] - 2026-05-23
+
+### Added / Changed
+
+* **CI/CD Workflow**: Updated `.github/workflows/dotnet.yml` to support trigger-by-tag release automation. When pushing tags matching `v*`, the build-and-test and publish jobs will run, automatically extracting the clean version number from the tag name (e.g., stripping `v` from `v2.3.8` to get `2.3.8`) and building/packaging assemblies with `-p:Version=2.3.8`.
+
+### Key Changes
+
+* Modified GitHub Action triggers in `.github/workflows/dotnet.yml` to include `tags: [ "v*" ]`.
+* Modified publish job logic to run on git tag pushes and dynamically feed the version parameter to `dotnet pack`.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 配置 GitHub Actions 自动通过 Git Tag 发布 NuGet 包
+
+### 🎯 最终目标
+
+* 修改 `.github/workflows/dotnet.yml` 通道触发与发布判定，使发布任务在推送 `v*` 标签时运行，并成功动态提取版本号执行 NuGet 打包。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[x] [.github/workflows/dotnet.yml](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.github/workflows/dotnet.yml) (原因：更新工作流的触发规则与打包步骤)
+* \[x] [.vuepress\_docs/docs/versions/v2.3.8.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v2.3.8.md) (原因：创建并管理版本记录文件)
+
+### 📝 Steps
+
+* \[x] Step 1: 创建 `v2.3.8.md` 并锁定上下文与 Task Board
+* \[x] Step 2: 修改 `.github/workflows/dotnet.yml` 以支持 `v*` 标签触发及打包版本号动态提取
+* \[x] Step 3: 更新 Task Board 并归档为 Release 记录
+
+\------details end------
+
+---
+
+---
+url: /versions/v2.3.9/index.md
+---
+# v2.3.9 — 中文文档标题汉化与英文文档翻译 (v2.3.9)
+
+**日期**：2026-05-23
+**类型**：Documentation
+
+***
+
+## \[v2.3.9] - 2026-05-23
+
+### Added / Changed
+
+* **Chinese Documentation**: Updated frontmatter `title` keys from English to their corresponding Chinese headings in all Chinese Markdown files.
+* **English Translation**: Completed full English translation of all 28 documentation files under `.vuepress_docs/docs/en/docs` with updated frontmatter.
+
+### Key Changes
+
+* Modified all Chinese `.md` files under `.vuepress_docs/docs/docs/` to correct their frontmatter titles to Chinese.
+* Translated and generated corresponding `.md` files under `.vuepress_docs/docs/en/docs/`.
+
+***
+
+\------details-----
+
+## 🔍 Task Details
+
+## 📌 Current Task Board: 中文文档标题汉化与英文文档翻译
+
+### 🎯 最终目标
+
+* 将 `.vuepress_docs/docs/docs/` 目录下所有 Markdown 文件的 frontmatter `title` 改为对应的中文标题。
+* 将 `.vuepress_docs/docs/docs/` 目录下所有的 28 个 Markdown 文件翻译为英文，并保存在 `.vuepress_docs/docs/en/docs/` 中，对应的 `title` 保持为英文。
+
+### 📂 涉及文件 (Strictly Locked)
+
+* \[/] 所有中文文档：`.vuepress_docs/docs/docs/**/*.md` (28个文件)
+* \[/] 所有英文文档：`.vuepress_docs/docs/en/docs/**/*.md` (28个文件)
+* \[x] [.vuepress\_docs/docs/versions/v2.3.9.md](file:///Users/entity/Desktop/Language/CSharp/UniGateway/UniCon/.vuepress_docs/docs/versions/v2.3.9.md) (原因：创建并管理版本记录文件)
+
+### 📝 Steps
+
+* \[x] Step 1: 创建 `v2.3.9.md` 并锁定上下文与 Task Board
+* \[ ] Step 2: 汉化中文文档 frontmatter 中的 title 字段
+* \[ ] Step 3: 创建并翻译所有 28 个对应的英文文档
+* \[ ] Step 4: 更新 Task Board 并归档为 Release 记录
+  \------details end------
+
+---
+
+---
+url: /versions/w5315779/index.md
+---
+# UniCon 版本更新记录
+
+## \[v1.1.0] - 2026-05-16
+
+### 更新内容
+
+* **测试框架集成 (Testing)**:
+  * 初始化了 `UniCon.Tests` 测试项目 (xUnit + Moq)。
+  * 实现了 `Core` 模块的单元测试，验证了 `ConnectionManager` 和 `JobManager` 的核心逻辑。
+  * 提供了所有驱动程序 (`S7`, `Modbus`, `OPC UA`, `MQTT`) 的典型使用方法测试案例。
+* **项目规范化 (Rules)**:
+  * 正式启用项目规则文件 `RULES.md`。
+  * 确立了版本追踪与更新的强制性规范。
+* **架构扩展 (Feature)**:
+  * 引入 `UniCon.Drivers.OpcUaPubSub` 插件驱动。
+  * 实现了 OPC UA Part 14 规范的 PubSub 通讯，支持双协议栈：基于 `UdpClient` 的组播收发 (UDP UADP) 及基于 `MQTTnet` 的消息订阅 (MQTT JSON)。
+  * 完全利用 `IUniconDriver` 中的 `SubscribeAsync` 设计，摒弃低效轮询，达成单向高速数据流接收。
+  * **连接字符串流式构建器与驱动快捷连接扩展 (Feature)**:
+    * 新增 `ConnectionStringBuilder`，提供流式 (Fluent) 的 API 来动态组装各种协议（S7, Modbus, MQTT, OPC UA, PubSub）的连接字符串，彻底杜绝手工拼接语法错误。
+    * 针对 `IUniconDriver` 添加了以 `ConnectS7Async`、`ConnectModbusAsync` 等为首的快捷连接扩展方法，极大优化了开发者使用体验。
+
+### 与上一版本区别
+
+* **代码质量保障**: 引入了自动化测试流程，确保核心组件逻辑的正确性。
+* **开发约束加强**: 通过 `RULES.md` 规范了团队协作与代码维护流程。
+* **可维护性提升**: 所有的模块现在都具备了标准的用法示例（即测试案例），降低了新开发者的上手难度。
