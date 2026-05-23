@@ -15,7 +15,7 @@ trigger: always_on
 
 AI 必须严格按顺序执行：
 
-1. 读取 `versions` 最新版本文件
+1. 读取 `.vuepress_docs/versions` 目录下的最新版本文件
 2. 创建 / 更新 Task Board
 3. 输出执行计划（文件 + 步骤）
 4. 执行单一 Task Step
@@ -33,7 +33,7 @@ AI 必须严格按顺序执行：
 
 ## 1.1 版本职责
 
-- 所有变更必须同步更新 `versions/`
+- 所有变更必须同步更新 `.vuepress_docs/versions/`
 - 大版本：新文件（v1.1.0.md）
 - 小变更：追加
 
@@ -115,12 +115,12 @@ AI 必须严格按顺序执行：
 并保留：
 
 ```md
-<details>
-<summary>🔍 Task Details</summary>
+------details-----
+## 🔍 Task Details
 
 [原 Task Board]
 
-</details>
+------details end------
 ```
 
 ✅ 保证：
