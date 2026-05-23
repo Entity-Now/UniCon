@@ -1,5 +1,5 @@
 ---
-title: connection-and-network-resilience
+title: 驱动连接自愈与网络韧性设计文档
 createTime: 2026/05/19 23:32:39
 permalink: /docs/xuapd4se/
 ---
