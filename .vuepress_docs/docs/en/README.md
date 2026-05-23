@@ -5,19 +5,51 @@ config:
   -
     type: hero
     full: true
+    background: tint-plate
     forceDark: true
     effect: lightning
     hero:
-      name: Theme Plume
-      tagline: VuePress Next Theme
-      text: A simple, feature-rich, document & blog
+      name: UniCon
+      tagline: High-Performance, Pluggable Industrial IoT Integration Framework Built on .NET 10
+      text: Masking southbound physical links and device protocol discrepancies. Providing a unified read/write contract and high-concurrency scan engine for modern Industry 4.0.
       actions:
         -
           theme: brand
-          text: Blog
-          link: /en/blog/
+          text: Get Started →
+          link: /en/docs/
         -
           theme: alt
-          text: Github →
-          link: https://github.com/pengzhanbo/vuepress-theme-plume
+          text: Changelog
+          link: /en/versions/
+        -
+          theme: alt
+          text: GitHub →
+          link: https://github.com/entity/UniCon
+  -
+    type: features
+    features:
+      -
+        icon: 🛡️
+        title: Unified Protocol Abstraction
+        details: Standard HTTP-like UniconRequest/Response contract, masking underlying discrepancies of S7, Modbus, OPC UA, MQTT, etc.
+      -
+        icon: ⚡
+        title: v2 High-Concurrency Engine
+        details: System.Threading.Channels based lock-free scanner, significantly cutting CPU/RAM costs in massive high-frequency tagging poll.
+      -
+        icon: 🔄
+        title: Autonomous Self-Healing
+        details: Built-in watchdog with exponential backoff retry to guarantee auto-recovery and link keeping in harsh industrial environment.
+      -
+        icon: 🕒
+        title: Quartz.NET Scheduling
+        details: Deep Quartz.NET integration supporting highly flexible Cron expressions and batch device-control tasks coordination.
+      -
+        icon: 🌐
+        title: Dynamic Minimal APIs
+        details: Out-of-the-box RESTful endpoints for runtime drivers mounting, tagging query, and real-time JSON responses.
+      -
+        icon: 📊
+        title: Data Quality & Traceability
+        details: Core DataValue<T> preserves Quality stamps and Server Timestamps to fit temporal database audit and clean requirements.
 ---

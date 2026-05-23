@@ -1,0 +1,20 @@
+<Project>
+  <PropertyGroup>
+    <!-- NuGet Package Metadata -->
+    <Authors>entity-now</Authors>
+    <Company>entity-now</Company>
+    <Description>UniCon (Universal Connection) is a high-performance, pluggable .NET 10 industrial IoT communication framework. Supports S7, Modbus, OPC UA, MQTT, and smart watchdog self-healing mechanisms. Contact: entity_now@qq.com</Description>
+    <PackageProjectUrl>https://unicon.rdr2.cn</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/entity/UniCon</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    
+    <!-- Embed README in NuGet Package -->
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <!-- ItemGroup to include README.md in NuGet package payload -->
+  <ItemGroup Condition="'$(IsPackable)' != 'false'">
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>
